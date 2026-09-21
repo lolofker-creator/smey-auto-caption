@@ -6,6 +6,10 @@ import threading
 from transformers import pipeline
 
 
+# =========================
+# APP
+# =========================
+
 st.set_page_config(
     page_title="🇰🇭 Smey Auto Caption",
     page_icon="🇰🇭"
@@ -16,11 +20,12 @@ st.write("🎙️ ស្គាល់សំឡេងខ្មែរ → 📝 Capt
 
 
 # =========================
-# SHARED MODEL
+# LOAD AI MODEL
 # =========================
 
 @st.cache_resource
 def load_model():
+
     return pipeline(
         "automatic-speech-recognition",
         model="1morecupofhottea/whisper-turbo-khmer-v9",
@@ -34,25 +39,35 @@ def load_model():
 # =========================
 
 @st.cache_resource
-def get_lock():
+def get_processing_lock():
+
     return threading.Lock()
 
 
-processing_lock = get_lock()
+processing_lock = get_processing_lock()
 
 
 # =========================
-# TIME
+# ASS TIME
 # =========================
 
 def ass_time(seconds):
+
     seconds = max(0, float(seconds))
 
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
+    hours = int(seconds // 3600)
 
-    return f"{h}:{m:02d}:{s:05.2f}"
+    minutes = int(
+        (seconds % 3600) // 60
+    )
+
+    secs = seconds % 60
+
+    return (
+        f"{hours}:"
+        f"{minutes:02d}:"
+        f"{secs:05.2f}"
+    )
 
 
 # =========================
@@ -77,11 +92,13 @@ def get_duration(filename):
         check=True
     )
 
-    return float(result.stdout.strip())
+    return float(
+        result.stdout.strip()
+    )
 
 
 # =========================
-# SPLIT KHMER TEXT
+# TEXT SPLIT
 # =========================
 
 def split_text(text):
@@ -92,9 +109,9 @@ def split_text(text):
         return []
 
     parts = [
-        x.strip()
-        for x in text.split(";")
-        if x.strip()
+        part.strip()
+        for part in text.split(";")
+        if part.strip()
     ]
 
     if len(parts) > 1:
@@ -103,6 +120,7 @@ def split_text(text):
     words = text.split()
 
     groups = []
+
     current = []
 
     for word in words:
@@ -110,34 +128,203 @@ def split_text(text):
         current.append(word)
 
         if len(current) >= 5:
-            groups.append(" ".join(current))
+
+            groups.append(
+                " ".join(current)
+            )
+
             current = []
 
     if current:
-        groups.append(" ".join(current))
+
+        groups.append(
+            " ".join(current)
+        )
 
     return groups
 
 
 # =========================
-# MAKE TIMED CAPTIONS
+# WORD TIMESTAMP CAPTIONS
 # =========================
 
-def make_groups(text, duration):
+def make_groups_from_chunks(chunks):
+
+    groups = []
+
+    current_words = []
+
+    group_start = None
+
+    group_end = None
+
+    for chunk in chunks:
+
+        text = chunk.get(
+            "text",
+            ""
+        ).strip()
+
+        timestamp = chunk.get(
+            "timestamp"
+        )
+
+        if not text:
+            continue
+
+        if not timestamp:
+            continue
+
+        start = timestamp[0]
+
+        end = timestamp[1]
+
+        if start is None:
+            continue
+
+        if end is None:
+
+            end = start + 0.5
+
+        if group_start is None:
+
+            group_start = start
+
+        current_words.append(text)
+
+        group_end = end
+
+        # ប្រហែល 5 ពាក្យក្នុង Caption មួយ
+        if len(current_words) >= 5:
+
+            groups.append(
+                (
+                    group_start,
+                    group_end,
+                    " ".join(current_words)
+                )
+            )
+
+            current_words = []
+
+            group_start = None
+
+            group_end = None
+
+    # ពាក្យដែលនៅសល់
+    if (
+        current_words
+        and group_start is not None
+        and group_end is not None
+    ):
+
+        groups.append(
+            (
+                group_start,
+                group_end,
+                " ".join(current_words)
+            )
+        )
+
+    return groups
+
+
+# =========================
+# FALLBACK SEGMENT TIMESTAMP
+# =========================
+
+def make_groups_from_segments(chunks):
+
+    groups = []
+
+    for chunk in chunks:
+
+        text = chunk.get(
+            "text",
+            ""
+        ).strip()
+
+        timestamp = chunk.get(
+            "timestamp"
+        )
+
+        if not text:
+            continue
+
+        if not timestamp:
+            continue
+
+        start = timestamp[0]
+
+        end = timestamp[1]
+
+        if start is None:
+            continue
+
+        if end is None:
+            end = start + 1
+
+        parts = split_text(text)
+
+        if not parts:
+            continue
+
+        duration = max(
+            0.1,
+            end - start
+        )
+
+        step = duration / len(parts)
+
+        for i, part in enumerate(parts):
+
+            part_start = (
+                start + i * step
+            )
+
+            part_end = (
+                start + (i + 1) * step
+            )
+
+            groups.append(
+                (
+                    part_start,
+                    part_end,
+                    part
+                )
+            )
+
+    return groups
+
+
+# =========================
+# FALLBACK TEXT
+# =========================
+
+def make_groups_from_text(
+    text,
+    duration
+):
 
     parts = split_text(text)
 
     if not parts:
         return []
 
-    step = duration / len(parts)
+    step = (
+        duration /
+        len(parts)
+    )
 
     groups = []
 
     for i, part in enumerate(parts):
 
         start = i * step
-        end = (i + 1) * step
+
+        end = (
+            (i + 1) * step
+        )
 
         groups.append(
             (
@@ -151,10 +338,13 @@ def make_groups(text, duration):
 
 
 # =========================
-# ASS CAPTION
+# CREATE ASS
 # =========================
 
-def create_ass(groups, filename):
+def create_ass(
+    groups,
+    filename
+):
 
     header = """[Script Info]
 ScriptType: v4.00+
@@ -169,17 +359,37 @@ Style: Khmer,Noto Sans Khmer,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H99000000,1,0,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(
+        filename,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
         f.write(header)
 
         for start, end, text in groups:
 
-            text = text.replace("\n", " ")
-            text = text.replace("{", r"\{")
-            text = text.replace("}", r"\}")
+            text = text.strip()
 
-            f.write(
+            if not text:
+                continue
+
+            text = text.replace(
+                "\n",
+                " "
+            )
+
+            text = text.replace(
+                "{",
+                r"\{"
+            )
+
+            text = text.replace(
+                "}",
+                r"\}"
+            )
+
+            line = (
                 "Dialogue: 0,"
                 + ass_time(start)
                 + ","
@@ -189,14 +399,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 + "\n"
             )
 
+            f.write(line)
+
 
 # =========================
-# UPLOAD
+# VIDEO UPLOAD
 # =========================
 
 video = st.file_uploader(
     "🎥 ជ្រើសវីដេអូ",
-    type=["mp4", "mov", "mkv", "webm"]
+    type=[
+        "mp4",
+        "mov",
+        "mkv",
+        "webm"
+    ]
 )
 
 
@@ -209,8 +426,13 @@ if video:
         use_container_width=True
     ):
 
-        # Only one heavy AI job at a time
-        if not processing_lock.acquire(blocking=False):
+        # =========================
+        # QUEUE CHECK
+        # =========================
+
+        if not processing_lock.acquire(
+            blocking=False
+        ):
 
             st.warning(
                 "⏳ មានអ្នកកំពុងប្រើ AI សូមរង់ចាំបន្តិច..."
@@ -242,9 +464,19 @@ if video:
                     "output.mp4"
                 )
 
-                # Save video
-                with open(input_file, "wb") as f:
-                    f.write(video.getbuffer())
+
+                # =========================
+                # SAVE VIDEO
+                # =========================
+
+                with open(
+                    input_file,
+                    "wb"
+                ) as f:
+
+                    f.write(
+                        video.getbuffer()
+                    )
 
 
                 # =========================
@@ -276,13 +508,17 @@ if video:
                     )
 
 
+                # =========================
+                # VIDEO LENGTH
+                # =========================
+
                 duration = get_duration(
                     input_file
                 )
 
 
                 # =========================
-                # KHMER AI
+                # AI SPEECH RECOGNITION
                 # =========================
 
                 with st.spinner(
@@ -293,17 +529,21 @@ if video:
 
                     result = model(
                         audio_file,
-                        return_timestamps=True
+                        return_timestamps="word"
                     )
 
 
-                text = result.get(
+                # =========================
+                # FULL TEXT
+                # =========================
+
+                full_text = result.get(
                     "text",
                     ""
                 ).strip()
 
 
-                if not text:
+                if not full_text:
 
                     st.error(
                         "❌ AI មិនអាចស្គាល់សំឡេងបានទេ។"
@@ -313,13 +553,47 @@ if video:
 
 
                 # =========================
-                # TIMED CAPTIONS
+                # WORD TIMESTAMPS
                 # =========================
 
-                groups = make_groups(
-                    text,
-                    duration
+                chunks = result.get(
+                    "chunks",
+                    []
                 )
+
+
+                groups = (
+                    make_groups_from_chunks(
+                        chunks
+                    )
+                )
+
+
+                # =========================
+                # SEGMENT FALLBACK
+                # =========================
+
+                if not groups:
+
+                    groups = (
+                        make_groups_from_segments(
+                            chunks
+                        )
+                    )
+
+
+                # =========================
+                # LAST FALLBACK
+                # =========================
+
+                if not groups:
+
+                    groups = (
+                        make_groups_from_text(
+                            full_text,
+                            duration
+                        )
+                    )
 
 
                 if not groups:
@@ -330,6 +604,10 @@ if video:
 
                     st.stop()
 
+
+                # =========================
+                # CREATE ASS
+                # =========================
 
                 create_ass(
                     groups,
@@ -367,6 +645,10 @@ if video:
                     )
 
 
+                # =========================
+                # RESULT
+                # =========================
+
                 st.success(
                     "✅ រួចរាល់!"
                 )
@@ -384,6 +666,7 @@ if video:
                         mime="video/mp4",
                         use_container_width=True
                     )
+
 
         finally:
 
