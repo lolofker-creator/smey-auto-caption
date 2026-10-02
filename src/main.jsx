@@ -4,11 +4,12 @@ import { pipeline } from "@huggingface/transformers";
 import "./style.css";
 
 let transcriber = null;
+let translator = null;
 
 async function getTranscriber(setStatus) {
   if (transcriber) return transcriber;
 
-  setStatus("⏳ កំពុងទាញ Whisper Tiny លើកដំបូង...");
+  setStatus("⏳ កំពុងទាញ Whisper Tiny...");
 
   transcriber = await pipeline(
     "automatic-speech-recognition",
@@ -18,10 +19,21 @@ async function getTranscriber(setStatus) {
   return transcriber;
 }
 
+async function getTranslator(setStatus) {
+  if (translator) return translator;
+
+  setStatus("🌐 កំពុងទាញ Khmer Translation model...");
+
+  translator = await pipeline(
+    "translation",
+    "Xenova/nllb-200-distilled-600M"
+  );
+
+  return translator;
+}
+
 function resampleAudio(input, fromRate, toRate) {
-  if (fromRate === toRate) {
-    return input;
-  }
+  if (fromRate === toRate) return input;
 
   const ratio = fromRate / toRate;
   const newLength = Math.round(input.length / ratio);
@@ -43,7 +55,6 @@ function resampleAudio(input, fromRate, toRate) {
 
 async function videoToAudio(videoFile) {
   const arrayBuffer = await videoFile.arrayBuffer();
-
   const audioContext = new AudioContext();
 
   const audioBuffer =
@@ -51,7 +62,6 @@ async function videoToAudio(videoFile) {
 
   const channels = audioBuffer.numberOfChannels;
   const length = audioBuffer.length;
-
   const mono = new Float32Array(length);
 
   for (let channel = 0; channel < channels; channel++) {
@@ -92,8 +102,12 @@ function App() {
   const [videoUrl, setVideoUrl] = useState("");
   const [status, setStatus] = useState("រង់ចាំវីដេអូ...");
   const [busy, setBusy] = useState(false);
+
   const [text, setText] = useState("");
+  const [translatedText, setTranslatedText] = useState("");
   const [caption, setCaption] = useState([]);
+
+  const [sourceLang, setSourceLang] = useState("eng_Latn");
 
   useEffect(() => {
     if (!video) {
@@ -104,9 +118,7 @@ function App() {
     const url = URL.createObjectURL(video);
     setVideoUrl(url);
 
-    return () => {
-      URL.revokeObjectURL(url);
-    };
+    return () => URL.revokeObjectURL(url);
   }, [video]);
 
   function handleVideo(event) {
@@ -116,6 +128,7 @@ function App() {
 
     setVideo(file);
     setText("");
+    setTranslatedText("");
     setCaption([]);
     setStatus(`បានជ្រើស៖ ${file.name}`);
   }
@@ -128,6 +141,7 @@ function App() {
 
     setBusy(true);
     setText("");
+    setTranslatedText("");
     setCaption([]);
 
     try {
@@ -145,37 +159,77 @@ function App() {
 
       setStatus("🤖 កំពុងដំណើរការ Whisper Tiny...");
 
-      const pipe = await getTranscriber(setStatus);
+      const whisper = await getTranscriber(setStatus);
 
-      const result = await pipe(audio, {
+      const result = await whisper(audio, {
         return_timestamps: true,
         chunk_length_s: 30,
         stride_length_s: 5,
       });
+
+      const whisperText = result.text?.trim() || "";
 
       const chunks = (result.chunks || [])
         .map((item) => ({
           start: item.timestamp?.[0] ?? 0,
           end: item.timestamp?.[1] ?? 0,
           text: item.text?.trim() || "",
+          khmer: "",
         }))
         .filter((item) => item.text);
 
-      setText(result.text?.trim() || "");
+      setText(whisperText);
       setCaption(chunks);
 
-      if (result.text?.trim()) {
-        setStatus(
-          `✅ Caption រួចរាល់ — ${chunks.length} ផ្នែក`
-        );
-      } else {
+      if (!whisperText) {
         setStatus("⚠️ Whisper មិនរកឃើញសំឡេងនិយាយទេ។");
+        return;
       }
+
+      setStatus("🌐 កំពុងបកប្រែទៅខ្មែរ...");
+
+      const translate = await getTranslator(setStatus);
+
+      const translatedParts = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        setStatus(
+          `🌐 បកប្រែទៅខ្មែរ ${i + 1}/${chunks.length}...`
+        );
+
+        const resultKhmer = await translate(chunks[i].text, {
+          src_lang: sourceLang,
+          tgt_lang: "khm_Khmr",
+        });
+
+        const khmer =
+          resultKhmer?.[0]?.translation_text?.trim() || "";
+
+        translatedParts.push(khmer);
+
+        setCaption((old) =>
+          old.map((item, index) =>
+            index === i
+              ? { ...item, khmer }
+              : item
+          )
+        );
+      }
+
+      setTranslatedText(
+        translatedParts.filter(Boolean).join(" ")
+      );
+
+      setStatus(
+        `✅ Caption + Khmer Translation រួចរាល់ — ${chunks.length} ផ្នែក`
+      );
     } catch (error) {
       console.error(error);
 
       setStatus(
-        `❌ មានបញ្ហា៖ ${error?.message || "Unknown error"}`
+        `❌ មានបញ្ហា៖ ${
+          error?.message || "Unknown error"
+        }`
       );
     } finally {
       setBusy(false);
@@ -228,6 +282,35 @@ function App() {
           </>
         )}
 
+        <div
+          style={{
+            marginTop: "14px",
+            padding: "12px",
+            borderRadius: "12px",
+            background: "#334155",
+          }}
+        >
+          <strong>🌐 ភាសាសំឡេងដើម</strong>
+
+          <select
+            value={sourceLang}
+            onChange={(e) => setSourceLang(e.target.value)}
+            disabled={busy}
+            style={{
+              width: "100%",
+              marginTop: "8px",
+              padding: "10px",
+              borderRadius: "10px",
+              fontSize: "16px",
+            }}
+          >
+            <option value="eng_Latn">English</option>
+            <option value="zho_Hans">
+              Chinese 简体中文
+            </option>
+          </select>
+        </div>
+
         <button
           className="start"
           onClick={start}
@@ -252,12 +335,28 @@ function App() {
               lineHeight: "1.8",
             }}
           >
-            <strong>
-              📝 Whisper Caption:
-            </strong>
+            <strong>📝 Whisper Caption:</strong>
 
             <div style={{ marginTop: "10px" }}>
               {text}
+            </div>
+          </div>
+        )}
+
+        {translatedText && (
+          <div
+            style={{
+              marginTop: "16px",
+              padding: "16px",
+              borderRadius: "14px",
+              background: "#0f172a",
+              lineHeight: "1.8",
+            }}
+          >
+            <strong>🇰🇭 Khmer Translation:</strong>
+
+            <div style={{ marginTop: "10px" }}>
+              {translatedText}
             </div>
           </div>
         )}
@@ -284,6 +383,17 @@ function App() {
                 <div style={{ marginTop: "4px" }}>
                   {item.text}
                 </div>
+
+                {item.khmer && (
+                  <div
+                    style={{
+                      marginTop: "6px",
+                      fontWeight: "700",
+                    }}
+                  >
+                    🇰🇭 {item.khmer}
+                  </div>
+                )}
               </div>
             ))}
           </div>
