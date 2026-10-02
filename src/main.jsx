@@ -11,9 +11,9 @@ let ttsSession = null;
 let ttsMeta = null;
 let ffmpegInstance = null;
 
-/* =========================
+/* =========================================================
    WHISPER
-========================= */
+========================================================= */
 
 async function getTranscriber(setStatus) {
   if (transcriber) return transcriber;
@@ -28,9 +28,9 @@ async function getTranscriber(setStatus) {
   return transcriber;
 }
 
-/* =========================
+/* =========================================================
    TRANSLATION
-========================= */
+========================================================= */
 
 async function translateText(text, sourceLang) {
   if (!text?.trim()) return "";
@@ -63,26 +63,37 @@ async function translateText(text, sourceLang) {
   );
 }
 
-/* =========================
+/* =========================================================
    AUDIO
-========================= */
+========================================================= */
 
 function resampleAudio(input, fromRate, toRate) {
-  if (fromRate === toRate) return input;
+  if (fromRate === toRate) {
+    return input;
+  }
 
   const ratio = fromRate / toRate;
-  const newLength = Math.round(input.length / ratio);
-  const output = new Float32Array(newLength);
+  const newLength = Math.round(
+    input.length / ratio
+  );
+
+  const output =
+    new Float32Array(newLength);
 
   for (let i = 0; i < newLength; i++) {
     const position = i * ratio;
-    const left = Math.floor(position);
-    const right = Math.min(
-      left + 1,
-      input.length - 1
-    );
 
-    const weight = position - left;
+    const left =
+      Math.floor(position);
+
+    const right =
+      Math.min(
+        left + 1,
+        input.length - 1
+      );
+
+    const weight =
+      position - left;
 
     output[i] =
       input[left] * (1 - weight) +
@@ -144,15 +155,18 @@ async function videoToAudio(videoFile) {
   return audio16k;
 }
 
-/* =========================
+/* =========================================================
    KHMER TTS
-========================= */
+========================================================= */
 
 const TTS_BASE =
   "https://huggingface.co/sengtha/khmer-tts-female-v2/resolve/main";
 
 async function loadKhmerTTS(setStatus) {
-  if (ttsSession && ttsMeta) {
+  if (
+    ttsSession &&
+    ttsMeta
+  ) {
     return {
       session: ttsSession,
       meta: ttsMeta,
@@ -193,7 +207,10 @@ async function loadKhmerTTS(setStatus) {
   };
 }
 
-function textToIds(text, meta) {
+function textToIds(
+  text,
+  meta
+) {
   const vocab =
     meta.vocab || [];
 
@@ -223,6 +240,12 @@ function textToIds(text, meta) {
 
   const blankId =
     idOf.get(meta.blank);
+
+  if (
+    blankId === undefined
+  ) {
+    return ids;
+  }
 
   const output = [
     blankId,
@@ -255,7 +278,14 @@ async function synthesizeKhmer(
     );
 
   if (!ids.length) {
-    return new Float32Array(0);
+    return {
+      samples:
+        new Float32Array(0),
+      sampleRate:
+        Number(
+          meta.sample_rate
+        ) || 22050,
+    };
   }
 
   const inputIds =
@@ -272,18 +302,37 @@ async function synthesizeKhmer(
 
   const feeds = {};
 
-  feeds[
-    session.inputNames[0]
-  ] =
+  /*
+    Model uses:
+    x
+    x_lengths
+  */
+
+  const inputNames =
+    session.inputNames;
+
+  const xName =
+    inputNames.find(
+      (name) =>
+        name === "x"
+    ) ||
+    inputNames[0];
+
+  const xLengthName =
+    inputNames.find(
+      (name) =>
+        name === "x_lengths"
+    ) ||
+    inputNames[1];
+
+  feeds[xName] =
     new ort.Tensor(
       "int64",
       inputIds,
       [1, ids.length]
     );
 
-  feeds[
-    session.inputNames[1]
-  ] =
+  feeds[xLengthName] =
     new ort.Tensor(
       "int64",
       lengths,
@@ -295,81 +344,38 @@ async function synthesizeKhmer(
       feeds
     );
 
+  const outputName =
+    session.outputNames[0];
+
   const tensor =
-    output[
-      session.outputNames[0]
-    ];
+    output[outputName];
 
-  return new Float32Array(
-    tensor.data
-  );
-}
-
-/* =========================
-   FIT AUDIO
-========================= */
-
-function fitAudioToDuration(
-  audio,
-  sampleRate,
-  duration
-) {
-  if (!audio.length) {
-    return audio;
-  }
-
-  const targetLength =
-    Math.max(
-      1,
-      Math.floor(
-        duration *
-          sampleRate
-      )
-    );
-
-  const output =
+  let samples =
     new Float32Array(
-      targetLength
+      tensor.data
     );
 
-  for (
-    let i = 0;
-    i < targetLength;
-    i++
-  ) {
-    const position =
-      i *
-      (audio.length - 1) /
-      Math.max(
-        1,
-        targetLength - 1
-      );
+  /*
+    Some ONNX outputs can be
+    [1,1,T] or [1,T].
+    The underlying data is still
+    the same continuous PCM array.
+  */
 
-    const left =
-      Math.floor(position);
+  const sampleRate =
+    Number(
+      meta.sample_rate
+    ) || 22050;
 
-    const right =
-      Math.min(
-        left + 1,
-        audio.length - 1
-      );
-
-    const weight =
-      position - left;
-
-    output[i] =
-      audio[left] *
-        (1 - weight) +
-      audio[right] *
-        weight;
-  }
-
-  return output;
+  return {
+    samples,
+    sampleRate,
+  };
 }
 
-/* =========================
+/* =========================================================
    WAV
-========================= */
+========================================================= */
 
 function floatToWav(
   samples,
@@ -509,9 +515,9 @@ function floatToWav(
   );
 }
 
-/* =========================
+/* =========================================================
    VIDEO DURATION
-========================= */
+========================================================= */
 
 function getVideoDuration(
   file
@@ -562,9 +568,9 @@ function getVideoDuration(
   );
 }
 
-/* =========================
+/* =========================================================
    FFMPEG
-========================= */
+========================================================= */
 
 async function getFFmpeg(
   setStatus
@@ -603,9 +609,62 @@ async function getFFmpeg(
   return ffmpeg;
 }
 
-/* =========================
-   CREATE DUBBING
-========================= */
+/* =========================================================
+   ATEMPO FILTER
+   Preserve pitch while changing speed.
+========================================================= */
+
+function makeAtempoFilters(
+  factor
+) {
+  let value =
+    Number(factor);
+
+  if (
+    !Number.isFinite(value) ||
+    value <= 0
+  ) {
+    return [
+      "atempo=1",
+    ];
+  }
+
+  const filters = [];
+
+  /*
+    FFmpeg atempo is safest
+    inside 0.5 - 2.0.
+
+    Split large changes into
+    multiple atempo filters.
+  */
+
+  while (value > 2) {
+    filters.push(
+      "atempo=2"
+    );
+
+    value /= 2;
+  }
+
+  while (value < 0.5) {
+    filters.push(
+      "atempo=0.5"
+    );
+
+    value /= 0.5;
+  }
+
+  filters.push(
+    `atempo=${value.toFixed(6)}`
+  );
+
+  return filters;
+}
+
+/* =========================================================
+   CREATE DUBBING VIDEO
+========================================================= */
 
 async function createDubbingVideo(
   videoFile,
@@ -615,142 +674,6 @@ async function createDubbingVideo(
   const duration =
     await getVideoDuration(
       videoFile
-    );
-
-  const sampleRate =
-    22050;
-
-  const master =
-    new Float32Array(
-      Math.ceil(
-        duration *
-          sampleRate
-      )
-    );
-
-  for (
-    let i = 0;
-    i < caption.length;
-    i++
-  ) {
-    const item =
-      caption[i];
-
-    const khmer =
-      item.khmer?.trim();
-
-    if (!khmer) continue;
-
-    if (
-      khmer.startsWith(
-        "⚠️"
-      )
-    ) {
-      continue;
-    }
-
-    setStatus(
-      `🗣️ បង្កើតសំឡេងខ្មែរ ${i + 1}/${caption.length}...`
-    );
-
-    const pcm =
-      await synthesizeKhmer(
-        khmer,
-        setStatus
-      );
-
-    if (!pcm.length) {
-      continue;
-    }
-
-    const start =
-      Math.max(
-        0,
-        Number(
-          item.start
-        ) || 0
-      );
-
-    const end =
-      Math.max(
-        start + 0.35,
-        Number(
-          item.end
-        ) ||
-          start + 1
-      );
-
-    const fitted =
-      fitAudioToDuration(
-        pcm,
-        sampleRate,
-        end - start
-      );
-
-    const startSample =
-      Math.floor(
-        start *
-          sampleRate
-      );
-
-    for (
-      let j = 0;
-      j < fitted.length;
-      j++
-    ) {
-      const index =
-        startSample + j;
-
-      if (
-        index >=
-        master.length
-      ) {
-        break;
-      }
-
-      master[index] +=
-        fitted[j];
-    }
-  }
-
-  let peak = 0;
-
-  for (
-    let i = 0;
-    i < master.length;
-    i++
-  ) {
-    peak =
-      Math.max(
-        peak,
-        Math.abs(
-          master[i]
-        )
-      );
-  }
-
-  if (peak > 0.95) {
-    const scale =
-      0.95 / peak;
-
-    for (
-      let i = 0;
-      i < master.length;
-      i++
-    ) {
-      master[i] *=
-        scale;
-    }
-  }
-
-  setStatus(
-    "🎵 កំពុងបញ្ចូលសំឡេងខ្មែរ..."
-  );
-
-  const wav =
-    floatToWav(
-      master,
-      sampleRate
     );
 
   const ffmpeg =
@@ -778,31 +701,343 @@ async function createDubbingVideo(
     )
   );
 
-  await ffmpeg.writeFile(
-    "khmer_voice.wav",
-    wav
-  );
+  /*
+    Remove old temporary
+    voice files from previous
+    generation.
+  */
+
+  for (
+    let i = 0;
+    i < caption.length;
+    i++
+  ) {
+    try {
+      await ffmpeg.deleteFile(
+        `voice_${i}.wav`
+      );
+    } catch {}
+
+    try {
+      await ffmpeg.deleteFile(
+        `voice_fit_${i}.wav`
+      );
+    } catch {}
+  }
+
+  const validSegments = [];
+
+  /* =======================================================
+     STEP 1
+     Generate each Khmer voice separately.
+  ======================================================= */
+
+  for (
+    let i = 0;
+    i < caption.length;
+    i++
+  ) {
+    const item =
+      caption[i];
+
+    const khmer =
+      item.khmer?.trim();
+
+    if (!khmer) {
+      continue;
+    }
+
+    if (
+      khmer.startsWith(
+        "⚠️"
+      )
+    ) {
+      continue;
+    }
+
+    let start =
+      Number(item.start);
+
+    let end =
+      Number(item.end);
+
+    if (
+      !Number.isFinite(start)
+    ) {
+      start = 0;
+    }
+
+    if (
+      !Number.isFinite(end)
+    ) {
+      end =
+        start + 1;
+    }
+
+    start =
+      Math.max(
+        0,
+        start
+      );
+
+    end =
+      Math.max(
+        start + 0.25,
+        end
+      );
+
+    /*
+      Never allow segment
+      outside video.
+    */
+
+    start =
+      Math.min(
+        start,
+        Math.max(
+          0,
+          duration - 0.05
+        )
+      );
+
+    end =
+      Math.min(
+        end,
+        duration
+      );
+
+    if (
+      end <= start
+    ) {
+      continue;
+    }
+
+    const targetDuration =
+      end - start;
+
+    setStatus(
+      `🗣️ បង្កើត Khmer Voice ${i + 1}/${caption.length}...`
+    );
+
+    const result =
+      await synthesizeKhmer(
+        khmer,
+        setStatus
+      );
+
+    if (
+      !result.samples.length
+    ) {
+      continue;
+    }
+
+    const sourceDuration =
+      result.samples.length /
+      result.sampleRate;
+
+    const voiceFile =
+      `voice_${i}.wav`;
+
+    const fittedFile =
+      `voice_fit_${i}.wav`;
+
+    const wav =
+      floatToWav(
+        result.samples,
+        result.sampleRate
+      );
+
+    await ffmpeg.writeFile(
+      voiceFile,
+      wav
+    );
+
+    /*
+      atempo factor:
+
+      source 2 sec
+      target 1 sec
+      => factor 2
+      => speak faster
+
+      source 1 sec
+      target 2 sec
+      => factor 0.5
+      => speak slower
+    */
+
+    const factor =
+      sourceDuration /
+      targetDuration;
+
+    const atempoFilters =
+      makeAtempoFilters(
+        factor
+      );
+
+    /*
+      Add tiny fade to prevent
+      clicks at boundaries.
+    */
+
+    const filter =
+      [
+        ...atempoFilters,
+        "afade=t=in:st=0:d=0.015",
+        `afade=t=out:st=${Math.max(
+          0.02,
+          targetDuration - 0.02
+        ).toFixed(3)}:d=0.015`,
+      ].join(",");
+
+    /*
+      If voice is already close
+      to target, atempo still
+      preserves pitch and gives
+      better timing than raw
+      resampling.
+    */
+
+    await ffmpeg.exec([
+      "-i",
+      voiceFile,
+
+      "-filter:a",
+      filter,
+
+      "-ar",
+      "22050",
+
+      "-ac",
+      "1",
+
+      "-y",
+
+      fittedFile,
+    ]);
+
+    validSegments.push({
+      file:
+        fittedFile,
+
+      start,
+
+      end,
+    });
+  }
+
+  if (
+    !validSegments.length
+  ) {
+    throw new Error(
+      "មិនមាន Khmer Voice សម្រាប់ Dubbing ទេ"
+    );
+  }
+
+  /* =======================================================
+     STEP 2
+     Build one FFmpeg filter graph.
+
+     Original audio:
+       30%
+
+     Khmer voices:
+       100%
+
+     Every voice:
+       exact Whisper timestamp
+  ======================================================= */
 
   setStatus(
-    "🎬 កំពុងបង្កើត MP4..."
+    "🎚️ កំពុង Sync Khmer Voice តាម timestamp..."
+  );
+
+  const inputArgs = [
+    "-i",
+    inputName,
+  ];
+
+  for (
+    const segment of validSegments
+  ) {
+    inputArgs.push(
+      "-i",
+      segment.file
+    );
+  }
+
+  const filterParts = [];
+
+  /*
+    Original video audio
+  */
+
+  filterParts.push(
+    "[0:a]volume=0.30[orig]"
+  );
+
+  const voiceLabels = [];
+
+  for (
+    let i = 0;
+    i < validSegments.length;
+    i++
+  ) {
+    const segment =
+      validSegments[i];
+
+    const inputIndex =
+      i + 1;
+
+    const label =
+      `v${i}`;
+
+    const delay =
+      Math.max(
+        0,
+        Math.round(
+          segment.start * 1000
+        )
+      );
+
+    filterParts.push(
+      `[${inputIndex}:a]adelay=${delay}:all=1,volume=1.0[${label}]`
+    );
+
+    voiceLabels.push(
+      `[${label}]`
+    );
+  }
+
+  /*
+    Mix original + all Khmer voices.
+  */
+
+  filterParts.push(
+    `[orig]${voiceLabels.join("")}amix=inputs=${
+      validSegments.length + 1
+    }:duration=first:dropout_transition=0:normalize=0[mix]`
+  );
+
+  const filterComplex =
+    filterParts.join(";");
+
+  setStatus(
+    "🎬 កំពុងបង្កើត MP4 និងរក្សា Original Music..."
   );
 
   try {
     await ffmpeg.exec([
-      "-i",
-      inputName,
-
-      "-i",
-      "khmer_voice.wav",
+      ...inputArgs,
 
       "-filter_complex",
-      "[0:a]volume=0.30[original];[1:a]volume=1.00[voice];[original][voice]amix=inputs=2:duration=first:dropout_transition=0[a]",
+      filterComplex,
 
       "-map",
       "0:v:0",
 
       "-map",
-      "[a]",
+      "[mix]",
 
       "-c:v",
       "copy",
@@ -813,30 +1048,37 @@ async function createDubbingVideo(
       "-b:a",
       "192k",
 
+      "-ar",
+      "48000",
+
+      "-ac",
+      "2",
+
       "-shortest",
+
+      "-movflags",
+      "+faststart",
+
+      "-y",
 
       outputName,
     ]);
   } catch (error) {
     console.warn(
-      "Trying video re-encode..."
+      "Video copy failed. Re-encoding..."
     );
 
     await ffmpeg.exec([
-      "-i",
-      inputName,
-
-      "-i",
-      "khmer_voice.wav",
+      ...inputArgs,
 
       "-filter_complex",
-      "[0:a]volume=0.30[original];[1:a]volume=1.00[voice];[original][voice]amix=inputs=2:duration=first:dropout_transition=0[a]",
+      filterComplex,
 
       "-map",
       "0:v:0",
 
       "-map",
-      "[a]",
+      "[mix]",
 
       "-c:v",
       "libx264",
@@ -847,13 +1089,27 @@ async function createDubbingVideo(
       "-crf",
       "28",
 
+      "-pix_fmt",
+      "yuv420p",
+
       "-c:a",
       "aac",
 
       "-b:a",
       "192k",
 
+      "-ar",
+      "48000",
+
+      "-ac",
+      "2",
+
       "-shortest",
+
+      "-movflags",
+      "+faststart",
+
+      "-y",
 
       outputName,
     ]);
@@ -864,6 +1120,14 @@ async function createDubbingVideo(
       outputName
     );
 
+  /*
+    IMPORTANT:
+    Use output directly.
+    Do not use output.buffer,
+    because Uint8Array can have
+    a non-zero byteOffset.
+  */
+
   return new Blob(
     [output],
     {
@@ -873,9 +1137,9 @@ async function createDubbingVideo(
   );
 }
 
-/* =========================
+/* =========================================================
    TIME
-========================= */
+========================================================= */
 
 function formatTime(
   seconds
@@ -914,14 +1178,15 @@ function formatTime(
   )}`;
 }
 
-/* =========================
-   REMOVE DUPLICATES
-========================= */
+/* =========================================================
+   CLEAN CHUNKS
+========================================================= */
 
 function cleanChunks(
   chunks
 ) {
   const result = [];
+
   let previous = "";
 
   for (
@@ -939,6 +1204,11 @@ function cleanChunks(
     if (!normalized) {
       continue;
     }
+
+    /*
+      Only remove exact consecutive
+      duplicates.
+    */
 
     if (
       normalized ===
@@ -958,9 +1228,9 @@ function cleanChunks(
   return result;
 }
 
-/* =========================
+/* =========================================================
    APP
-========================= */
+========================================================= */
 
 function App() {
   const [video, setVideo] =
@@ -994,6 +1264,10 @@ function App() {
   const [outputVideoUrl, setOutputVideoUrl] =
     useState("");
 
+  /* =======================================================
+     VIDEO PREVIEW
+  ======================================================= */
+
   useEffect(() => {
     if (!video) {
       setVideoUrl("");
@@ -1007,11 +1281,16 @@ function App() {
 
     setVideoUrl(url);
 
-    return () =>
+    return () => {
       URL.revokeObjectURL(
         url
       );
+    };
   }, [video]);
+
+  /* =======================================================
+     FILE SELECT
+  ======================================================= */
 
   function handleVideo(
     event
@@ -1047,6 +1326,10 @@ function App() {
     );
   }
 
+  /* =======================================================
+     START
+  ======================================================= */
+
   async function start() {
     if (!video) {
       setStatus(
@@ -1061,6 +1344,10 @@ function App() {
     setCaption([]);
 
     try {
+      /* -----------------------------------------------
+         AUDIO
+      ----------------------------------------------- */
+
       setStatus(
         "🎧 កំពុងអានសំឡេង..."
       );
@@ -1084,6 +1371,10 @@ function App() {
           "មិនមានសំឡេងក្នុងវីដេអូ"
         );
       }
+
+      /* -----------------------------------------------
+         WHISPER
+      ----------------------------------------------- */
 
       setStatus(
         "🤖 កំពុងដំណើរការ Whisper Tiny..."
@@ -1142,6 +1433,69 @@ function App() {
           chunks
         );
 
+      /*
+        Fix missing/zero end timestamps.
+      */
+
+      for (
+        let i = 0;
+        i < chunks.length;
+        i++
+      ) {
+        const current =
+          chunks[i];
+
+        const next =
+          chunks[i + 1];
+
+        if (
+          !Number.isFinite(
+            current.start
+          )
+        ) {
+          current.start = 0;
+        }
+
+        if (
+          !Number.isFinite(
+            current.end
+          ) ||
+          current.end <=
+            current.start
+        ) {
+          if (next) {
+            current.end =
+              Math.max(
+                current.start +
+                  0.35,
+                next.start
+              );
+          } else {
+            current.end =
+              current.start +
+              1;
+          }
+        }
+
+        /*
+          Don't let a segment
+          become ridiculously long.
+        */
+
+        current.start =
+          Math.max(
+            0,
+            current.start
+          );
+
+        current.end =
+          Math.max(
+            current.start +
+              0.25,
+            current.end
+          );
+      }
+
       setCaption(
         chunks
       );
@@ -1153,6 +1507,10 @@ function App() {
 
         return;
       }
+
+      /* -----------------------------------------------
+         TRANSLATION
+      ----------------------------------------------- */
 
       for (
         let i = 0;
@@ -1211,6 +1569,10 @@ function App() {
     }
   }
 
+  /* =======================================================
+     DUBBING
+  ======================================================= */
+
   async function handleDubbing() {
     if (
       !video ||
@@ -1250,6 +1612,15 @@ function App() {
           setStatus
         );
 
+      if (
+        !blob ||
+        blob.size === 0
+      ) {
+        throw new Error(
+          "MP4 ទទេ ឬបង្កើតមិនបាន"
+        );
+      }
+
       const url =
         URL.createObjectURL(
           blob
@@ -1264,7 +1635,7 @@ function App() {
       );
 
       setStatus(
-        "✅ MP4 រួចរាល់ — វីដេអូបង្ហាញខាងក្រោមហើយ!"
+        `✅ MP4 រួចរាល់ — ${(blob.size / 1024 / 1024).toFixed(1)} MB`
       );
     } catch (
       error
@@ -1286,6 +1657,10 @@ function App() {
     }
   }
 
+  /* =======================================================
+     UI
+  ======================================================= */
+
   return (
     <main className="app">
       <section className="card">
@@ -1297,6 +1672,10 @@ function App() {
         <p className="subtitle">
           Whisper • Khmer Translation • Khmer Voice • MP4
         </p>
+
+        {/* =================================================
+            UPLOAD
+        ================================================= */}
 
         <label className="upload">
           <span>
@@ -1356,14 +1735,21 @@ function App() {
           </>
         )}
 
+        {/* =================================================
+            SOURCE LANGUAGE
+        ================================================= */}
+
         <div
           style={{
             marginTop:
               "14px",
+
             padding:
               "12px",
+
             borderRadius:
               "12px",
+
             background:
               "#334155",
           }}
@@ -1388,12 +1774,16 @@ function App() {
             style={{
               width:
                 "100%",
+
               marginTop:
                 "8px",
+
               padding:
                 "10px",
+
               borderRadius:
                 "10px",
+
               fontSize:
                 "16px",
             }}
@@ -1407,6 +1797,10 @@ function App() {
             </option>
           </select>
         </div>
+
+        {/* =================================================
+            START
+        ================================================= */}
 
         <button
           className="start"
@@ -1422,6 +1816,10 @@ function App() {
             ? "⏳ កំពុងដំណើរការ..."
             : "▶️ ចាប់ផ្ដើម"}
         </button>
+
+        {/* =================================================
+            DUBBING BUTTON
+        ================================================= */}
 
         {caption.length >
           0 && (
@@ -1445,13 +1843,17 @@ function App() {
           </button>
         )}
 
+        {/* =================================================
+            STATUS
+        ================================================= */}
+
         <div className="status">
           {status}
         </div>
 
-        {/* =========================
+        {/* =================================================
             GENERATED VIDEO
-        ========================= */}
+        ================================================= */}
 
         {outputVideoUrl && (
           <div
@@ -1474,10 +1876,13 @@ function App() {
               style={{
                 width:
                   "100%",
+
                 borderRadius:
                   "14px",
+
                 display:
                   "block",
+
                 background:
                   "#000",
               }}
@@ -1492,22 +1897,31 @@ function App() {
                 style={{
                   display:
                     "block",
+
                   marginTop:
                     "12px",
+
                   padding:
                     "15px",
+
                   borderRadius:
                     "12px",
+
                   background:
                     "#16a34a",
+
                   color:
                     "#fff",
+
                   textAlign:
                     "center",
+
                   textDecoration:
                     "none",
+
                   fontWeight:
                     "800",
+
                   fontSize:
                     "17px",
                 }}
@@ -1518,9 +1932,9 @@ function App() {
           </div>
         )}
 
-        {/* =========================
-            CLEAN TIMELINE
-        ========================= */}
+        {/* =================================================
+            TIMELINE
+        ================================================= */}
 
         {caption.length >
           0 && (
@@ -1546,10 +1960,13 @@ function App() {
                   style={{
                     marginBottom:
                       "10px",
+
                     padding:
                       "13px",
+
                     borderRadius:
                       "12px",
+
                     background:
                       "#334155",
                   }}
@@ -1577,6 +1994,7 @@ function App() {
                     style={{
                       marginTop:
                         "7px",
+
                       fontWeight:
                         "600",
                     }}
@@ -1591,10 +2009,13 @@ function App() {
                       style={{
                         marginTop:
                           "8px",
+
                         paddingTop:
                           "8px",
+
                         borderTop:
                           "1px solid rgba(255,255,255,.15)",
+
                         fontWeight:
                           "700",
                       }}
@@ -1611,7 +2032,12 @@ function App() {
           </div>
         )}
 
+        {/* =================================================
+            FEATURES
+        ================================================= */}
+
         <div className="features">
+
           <div>
             🎙️ Whisper Speech → Caption
           </div>
@@ -1635,12 +2061,17 @@ function App() {
           <div>
             📥 MP4 Download
           </div>
+
         </div>
 
       </section>
     </main>
   );
 }
+
+/* =========================================================
+   START APP
+========================================================= */
 
 createRoot(
   document.getElementById(
