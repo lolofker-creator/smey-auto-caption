@@ -9,8 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@huggingface/transformers": "^4.3.0",
+    "@huggingface/plugin-transformers": "^0.0.1",
     "@vitejs/plugin-react": "^5.0.4",
+    "onnxruntime-web": "^1.30.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "vite": "^7.1.7"
