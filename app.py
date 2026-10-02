@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import asyncio
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 import imageio_ffmpeg
@@ -122,12 +123,12 @@ def transcribe_local(audio_path, source_language):
         audio_path,
         language=whisper_language,
         task="transcribe",
-        beam_size=3,
+        beam_size=1,
         best_of=1,
         temperature=0,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=350),
-        condition_on_previous_text=True,
+        condition_on_previous_text=False,
         initial_prompt=(
             "Chinese dialogue from a short drama. "
             "Transcribe the spoken words exactly; do not translate."
@@ -180,8 +181,8 @@ def translate_local(groups, source_code, target_code):
     results = translator.translate_batch(
         source_tokens,
         target_prefix=[[target_code] for _ in texts],
-        beam_size=4,
-        max_decoding_length=128,
+        beam_size=2,
+        max_decoding_length=96,
         repetition_penalty=1.15,
         no_repeat_ngram_size=3,
     )
@@ -312,22 +313,28 @@ def make_khmer_dubbing(
     temp_dir = tempfile.mkdtemp(prefix="smey_khmer_dub_")
 
     try:
-        clips = []
-
+        jobs = []
         for i, group in enumerate(groups):
             text = str(group.get("text", "")).strip()
             if not text:
                 continue
-
             raw = os.path.join(temp_dir, f"raw_{i:04d}.mp3")
             fitted = os.path.join(temp_dir, f"voice_{i:04d}.m4a")
             start = float(group["start"])
             end = float(group["end"])
             slot = max(0.25, end - start)
+            jobs.append((text, raw, fitted, start, slot))
 
+        # Generate several TTS lines concurrently to reduce total waiting time.
+        def make_one(job):
+            text, raw, fitted, start, slot = job
             asyncio.run(_tts_one(text, raw, voice, rate))
             _fit_audio_to_slot(raw, fitted, slot)
-            clips.append((fitted, start))
+            return fitted, start
+
+        worker_count = min(4, max(1, len(jobs)))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            clips = list(pool.map(make_one, jobs))
 
         inputs = ["-i", video_path]
         for clip, _start in clips:
@@ -436,8 +443,8 @@ def burn_caption(video_path, ass_path, output_path):
         "-i", video_path,
         "-vf", f"ass='{escaped_ass}'",
         "-c:v", "libx264",
-        "-preset", "veryfast",
         "-crf", "23",
+        "-preset", "ultrafast",
         "-c:a", "aac",
         "-b:a", "160k",
         "-movflags", "+faststart",
