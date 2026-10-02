@@ -13,24 +13,11 @@ import ctranslate2
 import sentencepiece as spm
 from huggingface_hub import snapshot_download
 
-
-# =========================================================
-# APP
-# =========================================================
-
-st.set_page_config(
-    page_title="Smey Auto Caption",
-    page_icon="🇰🇭",
-)
-
+st.set_page_config(page_title="Smey Auto Caption", page_icon="🇰🇭")
 st.title("🇰🇭 Smey Auto Caption")
 
-
-# =========================================================
-# LOCAL MODELS
-# =========================================================
-
-ASR_MODEL = "large-v3-turbo"
+# Fastest ASR model
+ASR_MODEL = "tiny"
 TRANSLATION_MODEL = "osa911/nllb-200-distilled-600M-ct2-int8"
 
 LANGUAGE_CODES = {
@@ -60,35 +47,20 @@ SOURCE_CODES = {
     "ja": "jpn_Jpan",
 }
 
-
 @st.cache_resource(show_spinner=False)
 def load_asr():
-    # CPU + INT8 for Streamlit Community Cloud.
-    return WhisperModel(
-        ASR_MODEL,
-        device="cpu",
-        compute_type="int8",
-    )
-
+    return WhisperModel(ASR_MODEL, device="cpu", compute_type="int8")
 
 @st.cache_resource(show_spinner=False)
 def load_translator():
-    # NLLB-200 distilled 600M INT8: multilingual local translation, CPU-friendly.
     model_dir = snapshot_download(TRANSLATION_MODEL)
     tokenizer = spm.SentencePieceProcessor(
         model_file=os.path.join(model_dir, "sentencepiece.bpe.model")
     )
     translator = ctranslate2.Translator(
-        model_dir,
-        device="cpu",
-        compute_type="int8",
+        model_dir, device="cpu", compute_type="int8"
     )
     return tokenizer, translator
-
-
-# =========================================================
-# FFmpeg
-# =========================================================
 
 def run_ffmpeg(args):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
@@ -99,7 +71,6 @@ def run_ffmpeg(args):
         check=True,
     )
 
-
 def extract_audio(video_path, audio_path):
     run_ffmpeg([
         "-y", "-i", video_path, "-vn",
@@ -107,14 +78,8 @@ def extract_audio(video_path, audio_path):
         "-c:a", "pcm_s16le", audio_path,
     ])
 
-
-# =========================================================
-# LOCAL ASR
-# =========================================================
-
 def transcribe_local(audio_path, source_language):
     model = load_asr()
-
     whisper_language = None
     if source_language != "Auto Detect":
         whisper_language = LANGUAGE_CODES[source_language]["whisper"]
@@ -138,28 +103,15 @@ def transcribe_local(audio_path, source_language):
     )
 
     groups = []
-
     for segment in segments:
         text = str(segment.text).strip()
         if not text:
             continue
-
         start = max(0.0, float(segment.start))
         end = max(start + 0.2, float(segment.end))
+        groups.append({"start": start, "end": end, "text": text})
 
-        groups.append({
-            "start": start,
-            "end": end,
-            "text": text,
-        })
-
-    detected = getattr(info, "language", None)
-    return groups, detected
-
-
-# =========================================================
-# LOCAL TRANSLATION — NO GEMINI
-# =========================================================
+    return groups, getattr(info, "language", None)
 
 def translate_local(groups, source_code, target_code):
     if not groups or source_code == target_code:
@@ -171,8 +123,6 @@ def translate_local(groups, source_code, target_code):
 
     tokenizer, translator = load_translator()
     texts = [str(g["text"]).strip() for g in groups]
-
-    # NLLB-200 format: source language token + SentencePiece tokens + EOS.
     source_tokens = [
         [src_lang] + tokenizer.encode(text, out_type=str) + ["</s>"]
         for text in texts
@@ -194,8 +144,6 @@ def translate_local(groups, source_code, target_code):
             tokens = tokens[1:]
         text = tokenizer.decode(tokens).strip()
 
-        # Safety against obvious decoder loops. Keep the original ASR text
-        # rather than publishing a corrupted repeated translation.
         words = text.split()
         if len(words) >= 8:
             unique_ratio = len(set(words)) / max(1, len(words))
@@ -213,14 +161,7 @@ def translate_local(groups, source_code, target_code):
         for group, translated_text in zip(groups, translated)
     ]
 
-
-# =========================================================
-# KHMER DUBBING — EDGE TTS, NO GEMINI
-# =========================================================
-
 async def _tts_one(text, output_path, voice, rate):
-    # Khmer TTS: use Google TTS directly. This avoids Edge TTS
-    # NoAudioReceived errors on Streamlit Cloud.
     fallback_path = output_path + ".gtts.mp3"
     try:
         gTTS(text=text, lang="km", slow=False).save(fallback_path)
@@ -238,8 +179,10 @@ async def _tts_one(text, output_path, voice, rate):
         else:
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
             subprocess.run(
-                [ffmpeg, "-y", "-i", fallback_path,
-                 "-filter:a", f"atempo={rate_value}", output_path],
+                [
+                    ffmpeg, "-y", "-i", fallback_path,
+                    "-filter:a", f"atempo={rate_value}", output_path
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=True,
@@ -258,7 +201,6 @@ async def _tts_one(text, output_path, voice, rate):
     if not os.path.exists(output_path) or os.path.getsize(output_path) <= 1000:
         raise RuntimeError("មិនអាចបង្កើតសំឡេងខ្មែរ TTS បានទេ។")
 
-
 def _audio_duration(path):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     proc = subprocess.run(
@@ -274,15 +216,12 @@ def _audio_duration(path):
     h, mm, ss = m.groups()
     return int(h) * 3600 + int(mm) * 60 + float(ss)
 
-
 def _fit_audio_to_slot(input_path, output_path, slot_seconds):
     duration = _audio_duration(input_path)
     if duration <= 0 or slot_seconds <= 0 or duration <= slot_seconds * 1.01:
         shutil.copyfile(input_path, output_path)
         return
 
-    # Speed up only as much as needed so each dubbed line ends before the
-    # next caption window. This keeps dialogue aligned to the speaker timing.
     factor = min(4.0, max(1.0, duration / max(0.05, slot_seconds)))
     chain = []
     remaining = factor
@@ -297,7 +236,6 @@ def _fit_audio_to_slot(input_path, output_path, slot_seconds):
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ])
-
 
 def make_khmer_dubbing(
     video_path,
@@ -325,7 +263,6 @@ def make_khmer_dubbing(
             slot = max(0.25, end - start)
             jobs.append((text, raw, fitted, start, slot))
 
-        # Generate several TTS lines concurrently to reduce total waiting time.
         def make_one(job):
             text, raw, fitted, start, slot = job
             asyncio.run(_tts_one(text, raw, voice, rate))
@@ -351,7 +288,8 @@ def make_khmer_dubbing(
 
         filters.append(
             "".join(mix)
-            + f"amix=inputs={len(mix)}:duration=first:dropout_transition=0:normalize=0[aout]"
+            + f"amix=inputs={len(mix)}:duration=first:"
+              "dropout_transition=0:normalize=0[aout]"
         )
 
         run_ffmpeg(
@@ -363,18 +301,11 @@ def make_khmer_dubbing(
                 "-y", output_audio,
             ]
         )
-
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-# =========================================================
-# ASS TIME
-# =========================================================
-
 def ass_time(seconds):
     seconds = max(0.0, float(seconds))
-
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -392,11 +323,6 @@ def ass_time(seconds):
 
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-
-# =========================================================
-# ASS SUBTITLE
-# =========================================================
-
 def create_ass(groups, filename):
     header = """[Script Info]
 ScriptType: v4.00+
@@ -413,27 +339,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     with open(filename, "w", encoding="utf-8") as f:
         f.write(header)
-
         for group in groups:
             text = str(group["text"]).replace("\n", " ")
             text = text.replace("{", r"\{").replace("}", r"\}")
-
             f.write(
-                f"Dialogue: 0,"
-                f"{ass_time(group['start'])},"
-                f"{ass_time(group['end'])},"
-                f"Khmer,,0,0,0,,{text}\n"
+                f"Dialogue: 0,{ass_time(group['start'])},"
+                f"{ass_time(group['end'])},Khmer,,0,0,0,,{text}\n"
             )
-
-
-# =========================================================
-# BURN CAPTION
-# =========================================================
 
 def burn_caption(video_path, ass_path, output_path):
     escaped_ass = (
-        ass_path
-        .replace("\\", "/")
+        ass_path.replace("\\", "/")
         .replace(":", r"\:")
         .replace("'", r"\'")
     )
@@ -450,11 +366,6 @@ def burn_caption(video_path, ass_path, output_path):
         "-movflags", "+faststart",
         output_path,
     ])
-
-
-# =========================================================
-# LANGUAGE SETTINGS
-# =========================================================
 
 source_language = st.selectbox(
     "🌐 ភាសាវីដេអូ",
@@ -482,11 +393,6 @@ target_language = st.selectbox(
     ],
 )
 
-
-# =========================================================
-# KHMER DUBBING OPTIONS
-# =========================================================
-
 st.divider()
 st.subheader("🗣️ និយាយខ្មែរ")
 
@@ -506,31 +412,16 @@ khmer_rate = st.select_slider(
 
 original_audio_volume = 0.05
 
-# =========================================================
-# VIDEO UPLOAD
-# =========================================================
-
 video = st.file_uploader(
     "🎥 បញ្ចូលវីដេអូ",
     type=["mp4", "mov", "mkv", "webm"],
 )
 
-
-# =========================================================
-# PROCESS
-# =========================================================
-
 if video is not None:
-
-    caption_clicked = st.button(
-        "▶️ ចាប់ផ្ដើម",
-        use_container_width=True,
-    )
+    caption_clicked = st.button("▶️ ចាប់ផ្ដើម", use_container_width=True)
 
     if caption_clicked:
-
         with tempfile.TemporaryDirectory() as temp_dir:
-
             video_path = os.path.join(temp_dir, "input.mp4")
             audio_path = os.path.join(temp_dir, "audio.wav")
             ass_path = os.path.join(temp_dir, "khmer_caption.ass")
@@ -540,18 +431,12 @@ if video is not None:
                 f.write(video.getbuffer())
 
             try:
-
                 with st.spinner("⚡ កំពុងដកសំឡេង..."):
                     extract_audio(video_path, audio_path)
 
-                # =================================================
-                # LOCAL SPEECH TO TEXT
-                # =================================================
-
                 with st.spinner("🎙️ Local Whisper កំពុងស្តាប់សំឡេង..."):
                     groups, detected_language = transcribe_local(
-                        audio_path,
-                        source_language,
+                        audio_path, source_language
                     )
 
                 if not groups:
@@ -559,7 +444,6 @@ if video is not None:
                         "❌ Local Whisper មិនបានរកឃើញ Caption ទេ។"
                     )
 
-                # Determine source language for local translation.
                 if source_language == "Auto Detect":
                     source_code = detected_language
                     if source_code not in SOURCE_CODES:
@@ -570,10 +454,6 @@ if video is not None:
                 else:
                     source_code = LANGUAGE_CODES[source_language]["translate"]
 
-                # =================================================
-                # LOCAL TRANSLATION
-                # =================================================
-
                 if target_language != "មិនបកប្រែ":
                     with st.spinner("🌐 Local Translator កំពុងបកប្រែ..."):
                         groups = translate_local(
@@ -582,12 +462,7 @@ if video is not None:
                             TARGET_CODES[target_language],
                         )
 
-                # =================================================
-                # KHMER DUBBING
-                # =================================================
-
                 if khmer_dubbing:
-
                     if target_language != "🇰🇭 ខ្មែរ":
                         raise RuntimeError(
                             "⚠️ Khmer Dubbing ត្រូវជ្រើស "
@@ -595,13 +470,10 @@ if video is not None:
                         )
 
                     dubbed_audio_path = os.path.join(
-                        temp_dir,
-                        "khmer_dubbed_audio.m4a",
+                        temp_dir, "khmer_dubbed_audio.m4a"
                     )
-
                     dubbed_video_path = os.path.join(
-                        temp_dir,
-                        "video_with_khmer_voice.mp4",
+                        temp_dir, "video_with_khmer_voice.mp4"
                     )
 
                     with st.spinner(
@@ -631,24 +503,12 @@ if video is not None:
 
                     video_path = dubbed_video_path
 
-                # =================================================
-                # CREATE ASS
-                # =================================================
-
                 create_ass(groups, ass_path)
-
-                # =================================================
-                # BURN CAPTION
-                # =================================================
 
                 with st.spinner(
                     "🎬 កំពុងដាក់ Caption ជាប់ក្នុងវីដេអូ..."
                 ):
-                    burn_caption(
-                        video_path,
-                        ass_path,
-                        output_path,
-                    )
+                    burn_caption(video_path, ass_path, output_path)
 
                 with open(output_path, "rb") as f:
                     output_data = f.read()
