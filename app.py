@@ -492,14 +492,7 @@ khmer_dubbing = st.checkbox(
     value=False,
 )
 
-khmer_voice = st.selectbox(
-    "🎙️ សំឡេង",
-    [
-        "km-KH-PisethNeural",
-        "km-KH-SreymomNeural",
-    ],
-    disabled=not khmer_dubbing,
-)
+khmer_voice = "km-KH-PisethNeural"
 
 khmer_rate = st.select_slider(
     "⚡ ល្បឿន",
