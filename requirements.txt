@@ -1,7 +1,9 @@
 streamlit
-transformers
 torch
 torchvision
-google-genai
 imageio-ffmpeg
 edge-tts
+faster-whisper
+ctranslate2==4.8.2
+sentencepiece==0.2.1
+huggingface-hub
