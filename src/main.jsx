@@ -1,14 +1,30 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 
 function App() {
   const [video, setVideo] = useState(null);
+  const [videoUrl, setVideoUrl] = useState("");
   const [status, setStatus] = useState("រង់ចាំវីដេអូ...");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (!video) {
+      setVideoUrl("");
+      return;
+    }
+
+    const url = URL.createObjectURL(video);
+    setVideoUrl(url);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [video]);
+
   function handleVideo(e) {
     const file = e.target.files?.[0];
+
     if (!file) return;
 
     setVideo(file);
@@ -24,16 +40,11 @@ function App() {
     setBusy(true);
     setStatus("កំពុងរៀបចំ Browser AI...");
 
-    /*
-      V2 browser-processing engine នឹងដំណើរការនៅទីនេះ។
-      វាមិនប្រើ Streamlit server CPU ទេ។
-    */
-
     try {
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       setStatus(
-        "វីដេអូរួចរាល់សម្រាប់ Browser AI។ យើងនឹងបន្ថែម Whisper + Khmer TTS engine បន្ទាប់។"
+        "បានត្រៀមវីដេអូរួចរាល់។ Preview វីដេអូខាងក្រោម។"
       );
     } catch (error) {
       setStatus(`មានបញ្ហា៖ ${error.message}`);
@@ -53,6 +64,7 @@ function App() {
 
         <label className="upload">
           <span>🎥 បញ្ចូលវីដេអូ</span>
+
           <input
             type="file"
             accept="video/mp4,video/mov,video/webm,video/mkv"
@@ -61,12 +73,30 @@ function App() {
         </label>
 
         {video && (
-          <div className="file">
-            <strong>📁 {video.name}</strong>
-            <small>
-              {(video.size / 1024 / 1024).toFixed(1)} MB
-            </small>
-          </div>
+          <>
+            <div className="file">
+              <strong>📁 {video.name}</strong>
+
+              <small>
+                {(video.size / 1024 / 1024).toFixed(1)} MB
+              </small>
+            </div>
+
+            {videoUrl && (
+              <video
+                src={videoUrl}
+                controls
+                playsInline
+                style={{
+                  width: "100%",
+                  marginTop: "16px",
+                  borderRadius: "14px",
+                  display: "block",
+                  background: "#000",
+                }}
+              />
+            )}
+          </>
         )}
 
         <button
