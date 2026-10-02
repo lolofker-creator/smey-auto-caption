@@ -1,16 +1,16 @@
 import os
 import subprocess
 import tempfile
-import json
-import time
 import asyncio
 import shutil
 
 import streamlit as st
-from google import genai
-from google.genai import types
 import imageio_ffmpeg
 import edge_tts
+from faster_whisper import WhisperModel
+import ctranslate2
+import sentencepiece as spm
+from huggingface_hub import snapshot_download
 
 
 # =========================================================
@@ -30,7 +30,62 @@ if os.path.exists(LOGO_FILE):
         st.image(LOGO_FILE, width=300)
 
 st.title("🇰🇭 Smey Auto Caption")
-st.write("Gemini → Caption → Auto Translate → Khmer Dubbing → MP4")
+st.write("Local AI → Caption → Auto Translate → Khmer Dubbing → MP4")
+
+
+# =========================================================
+# LOCAL MODELS
+# =========================================================
+
+ASR_MODEL = "small"
+TRANSLATION_MODEL = "solavr/small100-ctranslate2-int8"
+
+LANGUAGE_CODES = {
+    "🇰🇭 ខ្មែរ": {"whisper": "km", "translate": "km"},
+    "🇬🇧 English": {"whisper": "en", "translate": "en"},
+    "🇨🇳 中文": {"whisper": "zh", "translate": "zh"},
+    "🇻🇳 Tiếng Việt": {"whisper": "vi", "translate": "vi"},
+    "🇰🇷 한국어": {"whisper": "ko", "translate": "ko"},
+    "🇯🇵 日本語": {"whisper": "ja", "translate": "ja"},
+}
+
+TARGET_CODES = {
+    "🇰🇭 ខ្មែរ": "km",
+    "🇬🇧 English": "en",
+    "🇨🇳 中文": "zh",
+    "🇻🇳 Tiếng Việt": "vi",
+    "🇰🇷 한국어": "ko",
+    "🇯🇵 日本語": "ja",
+}
+
+
+@st.cache_resource(show_spinner=False)
+def load_asr():
+    # CPU + INT8 for Streamlit Community Cloud.
+    return WhisperModel(
+        ASR_MODEL,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=4,
+        num_workers=1,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def load_translator():
+    # SMaLL-100 INT8 is a compact CPU translation model.
+    model_dir = snapshot_download(TRANSLATION_MODEL)
+    tokenizer = spm.SentencePieceProcessor(
+        model_file=os.path.join(model_dir, "sentencepiece.bpe.model")
+    )
+    translator = ctranslate2.Translator(
+        model_dir,
+        device="cpu",
+        compute_type="int8_float32",
+        inter_threads=1,
+        intra_threads=4,
+    )
+    return tokenizer, translator
 
 
 # =========================================================
@@ -56,74 +111,88 @@ def extract_audio(video_path, audio_path):
 
 
 # =========================================================
-# Gemini JSON
+# LOCAL ASR
 # =========================================================
 
-def parse_json_response(response):
-    raw = getattr(response, "text", None)
+def transcribe_local(audio_path, source_language):
+    model = load_asr()
 
-    if not raw:
-        raise ValueError("Gemini មិនបានផ្ញើ JSON ត្រឡប់មកទេ។")
+    whisper_language = None
+    if source_language != "Auto Detect":
+        whisper_language = LANGUAGE_CODES[source_language]["whisper"]
 
-    raw = raw.strip()
+    segments, info = model.transcribe(
+        audio_path,
+        language=whisper_language,
+        task="transcribe",
+        beam_size=1,
+        best_of=1,
+        temperature=0,
+        vad_filter=True,
+        condition_on_previous_text=False,
+    )
 
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
+    groups = []
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            "Gemini បានផ្ញើទិន្នន័យដែលមិនមែនជា JSON ត្រឹមត្រូវ។"
-        ) from e
+    for segment in segments:
+        text = str(segment.text).strip()
+        if not text:
+            continue
 
+        start = max(0.0, float(segment.start))
+        end = max(start + 0.2, float(segment.end))
 
-def gemini_json(client, contents, model):
-    max_retries = 3
+        groups.append({
+            "start": start,
+            "end": end,
+            "text": text,
+        })
 
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-            return response, model
-
-        except Exception as e:
-            message = str(e)
-
-            if (
-                "429" in message
-                or "RESOURCE_EXHAUSTED" in message
-                or "quota" in message.lower()
-            ):
-                raise RuntimeError(
-                    "⚠️ Gemini API បានប្រើអស់ Quota។ "
-                    "ការបកប្រែ/ស្តាប់សំឡេងរបស់ Gemini នៅតែប្រើ API quota។"
-                ) from e
-
-            if "503" in message or "UNAVAILABLE" in message:
-                if attempt < max_retries - 1:
-                    time.sleep(2 + attempt * 2)
-                    continue
-
-                raise RuntimeError(
-                    "⚠️ Gemini Server កំពុងរវល់។ សូមសាកល្បងម្តងទៀត។"
-                ) from e
-
-            raise
+    detected = getattr(info, "language", None)
+    return groups, detected
 
 
 # =========================================================
-# KHMER DUBBING — timed voice, original music preserved
+# LOCAL TRANSLATION — NO GEMINI
+# =========================================================
+
+def translate_local(groups, source_code, target_code):
+    if not groups or source_code == target_code:
+        return groups
+
+    tokenizer, translator = load_translator()
+    texts = [str(g["text"]).strip() for g in groups]
+
+    source_tokens = [
+        [f"__{target_code}__"] + tokenizer.encode(text, out_type=str) + ["</s>"]
+        for text in texts
+    ]
+
+    results = translator.translate_batch(
+        source_tokens,
+        beam_size=3,
+        max_decoding_length=128,
+    )
+
+    translated = []
+    for result in results:
+        tokens = list(result.hypotheses[0])
+        if tokens and tokens[0] == f"__{target_code}__":
+            tokens = tokens[1:]
+        translated.append(tokenizer.decode(tokens).strip())
+
+    return [
+        {
+            "start": group["start"],
+            "end": group["end"],
+            "text": translated_text or group["text"],
+        }
+        for group, translated_text in zip(groups, translated)
+    ]
+
+
+# =========================================================
+# KHMER DUBBING — EDGE TTS, NO GEMINI
 # =========================================================
 
 async def _tts_one(text, output_path, voice, rate):
@@ -143,13 +212,6 @@ def make_khmer_dubbing(
     rate="+15%",
     original_volume=0.22,
 ):
-    """
-    Creates Khmer speech for each translated caption and places each
-    voice clip at its caption timestamp.
-
-    The original audio/music is kept underneath at reduced volume.
-    This is audio/timing sync, NOT visual lip-sync.
-    """
     if not groups:
         raise RuntimeError("❌ មិនមាន Caption សម្រាប់ Dubbing ទេ។")
 
@@ -171,14 +233,7 @@ def make_khmer_dubbing(
         async def run_all():
             await asyncio.gather(*jobs)
 
-        try:
-            asyncio.run(run_all())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(run_all())
-            finally:
-                loop.close()
+        asyncio.run(run_all())
 
         inputs = ["-i", video_path]
 
@@ -239,80 +294,6 @@ def ass_time(seconds):
 
 
 # =========================================================
-# AUTO TRANSLATE
-# =========================================================
-
-def translate_captions(client, groups, source_language, target_language):
-    if not groups or target_language == "មិនបកប្រែ":
-        return groups
-
-    source_map = {
-        "Auto Detect": "the original language",
-        "🇰🇭 ខ្មែរ": "Khmer",
-        "🇬🇧 English": "English",
-        "🇨🇳 中文": "Chinese",
-        "🇻🇳 Tiếng Việt": "Vietnamese",
-        "🇰🇷 한국어": "Korean",
-        "🇯🇵 日本語": "Japanese",
-    }
-
-    target_map = {
-        "🇰🇭 ខ្មែរ": "Khmer",
-        "🇬🇧 English": "English",
-        "🇨🇳 中文": "Chinese",
-        "🇻🇳 Tiếng Việt": "Vietnamese",
-        "🇰🇷 한국어": "Korean",
-        "🇯🇵 日本語": "Japanese",
-    }
-
-    source_name = source_map.get(source_language, "the original language")
-    target_name = target_map.get(target_language, "Khmer")
-
-    texts = [group["text"] for group in groups]
-
-    prompt = f"""
-Translate the following video captions.
-
-Source language: {source_name}
-Target language: {target_name}
-
-IMPORTANT:
-1. Return exactly one translated string for each input caption.
-2. Keep the exact same order.
-3. Do not add explanations.
-4. Do not add numbering.
-5. Do not merge captions.
-6. Keep names and numbers accurate.
-7. For Khmer, use natural spoken Khmer suitable for voice dubbing.
-8. Keep each translation short enough to fit the original timing.
-9. Return only a JSON array of strings.
-
-Captions:
-"""
-
-    for i, text in enumerate(texts, start=1):
-        prompt += f"\n{i}. {text}"
-
-    response, _ = gemini_json(client, prompt, "gemini-3.8-flash")
-    translated = parse_json_response(response)
-
-    if not isinstance(translated, list):
-        raise ValueError("Gemini មិនបានបញ្ជូន JSON array សម្រាប់ការបកប្រែទេ។")
-
-    if len(translated) != len(groups):
-        raise ValueError("Gemini បានបកប្រែចំនួន Caption មិនត្រូវគ្នា។")
-
-    return [
-        {
-            "start": group["start"],
-            "end": group["end"],
-            "text": str(translated_text).strip(),
-        }
-        for group, translated_text in zip(groups, translated)
-    ]
-
-
-# =========================================================
 # ASS SUBTITLE
 # =========================================================
 
@@ -346,7 +327,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 # =========================================================
-# BURN CAPTION INTO VIDEO
+# BURN CAPTION
 # =========================================================
 
 def burn_caption(video_path, ass_path, output_path):
@@ -432,13 +413,18 @@ khmer_rate = st.select_slider(
 
 if khmer_dubbing:
     st.caption(
-        "សំឡេងខ្មែរនឹងចាប់ផ្ដើមតាម Caption timestamp។ "
+        "សំឡេងខ្មែរចាប់ផ្ដើមតាម Caption timestamp។ "
         "សំឡេង/តន្ត្រីដើមនៅដដែល ប៉ុន្តែបន្ថយ volume ខាងក្រោយ។"
     )
     st.warning(
         "⚠️ Version នេះធ្វើ Audio/Timing Sync ប៉ុណ្ណោះ។ "
         "វាមិនធ្វើឲ្យមាត់តួអង្គផ្លាស់ទីតាមសំឡេងទេ។"
     )
+
+st.info(
+    "🆓 Local AI Mode: Caption + Translation មិនប្រើ Gemini API។ "
+    "ដូច្នេះវាមិនដក Gemini quota ពេលបង្កើតវីដេអូទេ។"
+)
 
 
 # =========================================================
@@ -476,111 +462,45 @@ if video is not None:
 
             try:
 
-                if "GEMINI_API_KEY" not in st.secrets:
-                    raise RuntimeError(
-                        "❌ រកមិនឃើញ GEMINI_API_KEY។ "
-                        "សូមបញ្ចូល API Key នៅ Streamlit Secrets។"
-                    )
-
                 with st.spinner("⚡ កំពុងដកសំឡេង..."):
                     extract_audio(video_path, audio_path)
 
-                with st.spinner("🎙️ Gemini កំពុងស្តាប់សំឡេង..."):
+                # =================================================
+                # LOCAL SPEECH TO TEXT
+                # =================================================
 
-                    client = genai.Client(
-                        api_key=st.secrets["GEMINI_API_KEY"]
-                    )
-
-                    audio_file = client.files.upload(file=audio_path)
-
-                    language_code_map = {
-                        "🇰🇭 ខ្មែរ": "km-KH",
-                        "🇬🇧 English": "en-US",
-                        "🇨🇳 中文": "zh-CN",
-                        "🇻🇳 Tiếng Việt": "vi-VN",
-                        "🇰🇷 한국어": "ko-KR",
-                        "🇯🇵 日本語": "ja-JP",
-                    }
-
-                    language_hint = language_code_map.get(
+                with st.spinner("🎙️ Local Whisper កំពុងស្តាប់សំឡេង..."):
+                    groups, detected_language = transcribe_local(
+                        audio_path,
                         source_language,
-                        "detect automatically",
                     )
 
-                    timestamp_prompt = f"""
-Transcribe this audio accurately.
-
-Language: {language_hint}
-
-Return ONLY valid JSON.
-
-Return an array of caption segments.
-Each segment must have:
-- start: number of seconds from the beginning
-- end: number of seconds from the beginning
-- text: the exact spoken words
-
-Make short natural caption segments, about 2 seconds each.
-Do not translate.
-Do not add explanations.
-Do not add markdown.
-"""
-
-                    response, _ = gemini_json(
-                        client,
-                        [
-                            types.Part.from_uri(
-                                file_uri=audio_file.uri,
-                                mime_type=audio_file.mime_type,
-                            ),
-                            timestamp_prompt,
-                        ],
-                        "gemini-3.8-flash",
+                if not groups:
+                    raise RuntimeError(
+                        "❌ Local Whisper មិនបានរកឃើញ Caption ទេ។"
                     )
 
-                    raw_segments = parse_json_response(response)
-                    groups = []
-
-                    if isinstance(raw_segments, list):
-                        for item in raw_segments:
-                            if not isinstance(item, dict):
-                                continue
-
-                            text = str(item.get("text", "")).strip()
-                            if not text:
-                                continue
-
-                            try:
-                                start = float(item.get("start", 0))
-                                end = float(item.get("end", start + 2))
-                            except (TypeError, ValueError):
-                                continue
-
-                            if end <= start:
-                                end = start + 2
-
-                            groups.append({
-                                "start": max(0, start),
-                                "end": max(0, end),
-                                "text": text,
-                            })
-
-                    if not groups:
+                # Determine source language for local translation.
+                if source_language == "Auto Detect":
+                    source_code = detected_language
+                    if source_code not in {"zh", "en", "km", "vi", "ko", "ja"}:
                         raise RuntimeError(
-                            "❌ Gemini មិនបានរកឃើញ Caption timestamps ទេ។"
+                            f"❌ Auto Detect រកភាសា '{detected_language}' "
+                            "ដែលមិនទាន់មានក្នុង Local Translator Map។"
                         )
+                else:
+                    source_code = LANGUAGE_CODES[source_language]["translate"]
 
                 # =================================================
-                # TRANSLATE
+                # LOCAL TRANSLATION
                 # =================================================
 
                 if target_language != "មិនបកប្រែ":
-                    with st.spinner("🌐 Gemini កំពុងបកប្រែ Caption..."):
-                        groups = translate_captions(
-                            client,
+                    with st.spinner("🌐 Local Translator កំពុងបកប្រែ..."):
+                        groups = translate_local(
                             groups,
-                            source_language,
-                            target_language,
+                            source_code,
+                            TARGET_CODES[target_language],
                         )
 
                 # =================================================
@@ -666,28 +586,5 @@ Do not add markdown.
                     on_click="ignore",
                 )
 
-            except RuntimeError as e:
-                st.error(str(e))
-
             except Exception as e:
-                message = str(e)
-
-                if (
-                    "429" in message
-                    or "RESOURCE_EXHAUSTED" in message
-                    or "quota" in message.lower()
-                ):
-                    st.error(
-                        "⚠️ Gemini API បានប្រើអស់ Quota។ "
-                        "សូមរង់ចាំ Quota Reset ឬពិនិត្យ Billing។"
-                    )
-
-                elif "503" in message or "UNAVAILABLE" in message:
-                    st.error(
-                        "⚠️ Gemini Server កំពុងរវល់។ សូមសាកល្បងម្តងទៀត។"
-                    )
-
-                else:
-                    st.error(
-                        f"❌ មានបញ្ហាពេលបង្កើតវីដេអូ: {message}"
-                    )
+                st.error(f"❌ មានបញ្ហាពេលបង្កើតវីដេអូ: {e}")
