@@ -11,6 +11,10 @@ let ttsSession = null;
 let ttsMeta = null;
 let ffmpegInstance = null;
 
+/* =========================
+   WHISPER
+========================= */
+
 async function getTranscriber(setStatus) {
   if (transcriber) return transcriber;
 
@@ -24,11 +28,17 @@ async function getTranscriber(setStatus) {
   return transcriber;
 }
 
+/* =========================
+   TRANSLATION
+========================= */
+
 async function translateText(text, sourceLang) {
   if (!text?.trim()) return "";
 
   const source =
-    sourceLang === "zho_Hans" ? "zh-CN" : "en";
+    sourceLang === "zho_Hans"
+      ? "zh-CN"
+      : "en";
 
   const params = new URLSearchParams({
     q: text.trim(),
@@ -41,13 +51,21 @@ async function translateText(text, sourceLang) {
   );
 
   if (!response.ok) {
-    throw new Error(`Translation API error ${response.status}`);
+    throw new Error(
+      `Translation API error ${response.status}`
+    );
   }
 
   const data = await response.json();
 
-  return data?.responseData?.translatedText?.trim() || "";
+  return (
+    data?.responseData?.translatedText?.trim() || ""
+  );
 }
+
+/* =========================
+   AUDIO
+========================= */
 
 function resampleAudio(input, fromRate, toRate) {
   if (fromRate === toRate) return input;
@@ -59,7 +77,11 @@ function resampleAudio(input, fromRate, toRate) {
   for (let i = 0; i < newLength; i++) {
     const position = i * ratio;
     const left = Math.floor(position);
-    const right = Math.min(left + 1, input.length - 1);
+    const right = Math.min(
+      left + 1,
+      input.length - 1
+    );
+
     const weight = position - left;
 
     output[i] =
@@ -71,29 +93,54 @@ function resampleAudio(input, fromRate, toRate) {
 }
 
 async function videoToAudio(videoFile) {
-  const arrayBuffer = await videoFile.arrayBuffer();
-  const audioContext = new AudioContext();
+  const arrayBuffer =
+    await videoFile.arrayBuffer();
+
+  const audioContext =
+    new AudioContext();
+
   const audioBuffer =
-    await audioContext.decodeAudioData(arrayBuffer);
+    await audioContext.decodeAudioData(
+      arrayBuffer
+    );
 
-  const channels = audioBuffer.numberOfChannels;
-  const mono = new Float32Array(audioBuffer.length);
+  const channels =
+    audioBuffer.numberOfChannels;
 
-  for (let channel = 0; channel < channels; channel++) {
-    const data = audioBuffer.getChannelData(channel);
+  const mono =
+    new Float32Array(
+      audioBuffer.length
+    );
 
-    for (let i = 0; i < mono.length; i++) {
-      mono[i] += data[i] / channels;
+  for (
+    let channel = 0;
+    channel < channels;
+    channel++
+  ) {
+    const data =
+      audioBuffer.getChannelData(
+        channel
+      );
+
+    for (
+      let i = 0;
+      i < mono.length;
+      i++
+    ) {
+      mono[i] +=
+        data[i] / channels;
     }
   }
 
-  const audio16k = resampleAudio(
-    mono,
-    audioBuffer.sampleRate,
-    16000
-  );
+  const audio16k =
+    resampleAudio(
+      mono,
+      audioBuffer.sampleRate,
+      16000
+    );
 
   await audioContext.close();
+
   return audio16k;
 }
 
@@ -106,24 +153,38 @@ const TTS_BASE =
 
 async function loadKhmerTTS(setStatus) {
   if (ttsSession && ttsMeta) {
-    return { session: ttsSession, meta: ttsMeta };
+    return {
+      session: ttsSession,
+      meta: ttsMeta,
+    };
   }
 
-  setStatus("🗣️ កំពុងទាញ Khmer Voice...");
+  setStatus(
+    "🗣️ កំពុងទាញ Khmer Voice..."
+  );
 
   const metaResponse =
-    await fetch(`${TTS_BASE}/tts_meta.json`);
+    await fetch(
+      `${TTS_BASE}/tts_meta.json`
+    );
 
   if (!metaResponse.ok) {
-    throw new Error("មិនអាចទាញ Khmer TTS metadata");
+    throw new Error(
+      "មិនអាចទាញ Khmer TTS metadata"
+    );
   }
 
-  ttsMeta = await metaResponse.json();
+  ttsMeta =
+    await metaResponse.json();
 
   ttsSession =
     await ort.InferenceSession.create(
       `${TTS_BASE}/khmer_tts_v3.onnx`,
-      { executionProviders: ["wasm"] }
+      {
+        executionProviders: [
+          "wasm",
+        ],
+      }
     );
 
   return {
@@ -133,24 +194,39 @@ async function loadKhmerTTS(setStatus) {
 }
 
 function textToIds(text, meta) {
-  const vocab = meta.vocab || [];
+  const vocab =
+    meta.vocab || [];
 
-  const idOf = new Map(
-    vocab.map((char, index) => [char, index])
-  );
+  const idOf =
+    new Map(
+      vocab.map(
+        (char, index) => [
+          char,
+          index,
+        ]
+      )
+    );
 
   const ids = [];
 
   for (const char of text) {
     if (idOf.has(char)) {
-      ids.push(idOf.get(char));
+      ids.push(
+        idOf.get(char)
+      );
     }
   }
 
-  if (!meta.add_blank) return ids;
+  if (!meta.add_blank) {
+    return ids;
+  }
 
-  const blankId = idOf.get(meta.blank);
-  const output = [blankId];
+  const blankId =
+    idOf.get(meta.blank);
+
+  const output = [
+    blankId,
+  ];
 
   for (const id of ids) {
     output.push(id);
@@ -160,78 +236,132 @@ function textToIds(text, meta) {
   return output;
 }
 
-async function synthesizeKhmer(text, setStatus) {
-  const { session, meta } =
-    await loadKhmerTTS(setStatus);
+async function synthesizeKhmer(
+  text,
+  setStatus
+) {
+  const {
+    session,
+    meta,
+  } =
+    await loadKhmerTTS(
+      setStatus
+    );
 
-  const ids = textToIds(text, meta);
+  const ids =
+    textToIds(
+      text,
+      meta
+    );
 
   if (!ids.length) {
     return new Float32Array(0);
   }
 
-  const inputIds = new BigInt64Array(
-    ids.map((x) => BigInt(x))
-  );
+  const inputIds =
+    new BigInt64Array(
+      ids.map(
+        (x) => BigInt(x)
+      )
+    );
 
-  const lengths = new BigInt64Array([
-    BigInt(ids.length),
-  ]);
+  const lengths =
+    new BigInt64Array([
+      BigInt(ids.length),
+    ]);
 
   const feeds = {};
 
-  feeds[session.inputNames[0]] =
+  feeds[
+    session.inputNames[0]
+  ] =
     new ort.Tensor(
       "int64",
       inputIds,
       [1, ids.length]
     );
 
-  feeds[session.inputNames[1]] =
+  feeds[
+    session.inputNames[1]
+  ] =
     new ort.Tensor(
       "int64",
       lengths,
       [1]
     );
 
-  const output = await session.run(feeds);
+  const output =
+    await session.run(
+      feeds
+    );
 
   const tensor =
-    output[session.outputNames[0]];
+    output[
+      session.outputNames[0]
+    ];
 
-  return new Float32Array(tensor.data);
+  return new Float32Array(
+    tensor.data
+  );
 }
+
+/* =========================
+   FIT AUDIO
+========================= */
 
 function fitAudioToDuration(
   audio,
   sampleRate,
   duration
 ) {
-  if (!audio.length) return audio;
+  if (!audio.length) {
+    return audio;
+  }
 
-  const targetLength = Math.max(
-    1,
-    Math.floor(duration * sampleRate)
-  );
+  const targetLength =
+    Math.max(
+      1,
+      Math.floor(
+        duration *
+          sampleRate
+      )
+    );
 
   const output =
-    new Float32Array(targetLength);
+    new Float32Array(
+      targetLength
+    );
 
-  for (let i = 0; i < targetLength; i++) {
+  for (
+    let i = 0;
+    i < targetLength;
+    i++
+  ) {
     const position =
       i *
       (audio.length - 1) /
-      Math.max(1, targetLength - 1);
+      Math.max(
+        1,
+        targetLength - 1
+      );
 
-    const left = Math.floor(position);
+    const left =
+      Math.floor(position);
+
     const right =
-      Math.min(left + 1, audio.length - 1);
+      Math.min(
+        left + 1,
+        audio.length - 1
+      );
 
-    const weight = position - left;
+    const weight =
+      position - left;
 
     output[i] =
-      audio[left] * (1 - weight) +
-      audio[right] * weight;
+      audio[left] *
+        (1 - weight) +
+      audio[right] *
+        weight;
   }
 
   return output;
@@ -241,41 +371,105 @@ function fitAudioToDuration(
    WAV
 ========================= */
 
-function floatToWav(samples, sampleRate) {
-  const buffer = new ArrayBuffer(
-    44 + samples.length * 2
-  );
+function floatToWav(
+  samples,
+  sampleRate
+) {
+  const buffer =
+    new ArrayBuffer(
+      44 +
+      samples.length * 2
+    );
 
-  const view = new DataView(buffer);
+  const view =
+    new DataView(
+      buffer
+    );
 
-  const writeString = (offset, value) => {
-    for (let i = 0; i < value.length; i++) {
+  function writeString(
+    offset,
+    value
+  ) {
+    for (
+      let i = 0;
+      i < value.length;
+      i++
+    ) {
       view.setUint8(
         offset + i,
         value.charCodeAt(i)
       );
     }
-  };
+  }
 
-  writeString(0, "RIFF");
+  writeString(
+    0,
+    "RIFF"
+  );
+
   view.setUint32(
     4,
-    36 + samples.length * 2,
+    36 +
+      samples.length * 2,
     true
   );
 
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
+  writeString(
+    8,
+    "WAVE"
+  );
 
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
+  writeString(
+    12,
+    "fmt "
+  );
 
-  writeString(36, "data");
+  view.setUint32(
+    16,
+    16,
+    true
+  );
+
+  view.setUint16(
+    20,
+    1,
+    true
+  );
+
+  view.setUint16(
+    22,
+    1,
+    true
+  );
+
+  view.setUint32(
+    24,
+    sampleRate,
+    true
+  );
+
+  view.setUint32(
+    28,
+    sampleRate * 2,
+    true
+  );
+
+  view.setUint16(
+    32,
+    2,
+    true
+  );
+
+  view.setUint16(
+    34,
+    16,
+    true
+  );
+
+  writeString(
+    36,
+    "data"
+  );
 
   view.setUint32(
     40,
@@ -285,11 +479,19 @@ function floatToWav(samples, sampleRate) {
 
   let offset = 44;
 
-  for (let i = 0; i < samples.length; i++) {
-    const sample = Math.max(
-      -1,
-      Math.min(1, samples[i])
-    );
+  for (
+    let i = 0;
+    i < samples.length;
+    i++
+  ) {
+    const sample =
+      Math.max(
+        -1,
+        Math.min(
+          1,
+          samples[i]
+        )
+      );
 
     view.setInt16(
       offset,
@@ -302,60 +504,101 @@ function floatToWav(samples, sampleRate) {
     offset += 2;
   }
 
-  return new Uint8Array(buffer);
+  return new Uint8Array(
+    buffer
+  );
 }
 
-function getVideoDuration(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
+/* =========================
+   VIDEO DURATION
+========================= */
 
-    video.preload = "metadata";
+function getVideoDuration(
+  file
+) {
+  return new Promise(
+    (resolve, reject) => {
+      const url =
+        URL.createObjectURL(
+          file
+        );
 
-    video.onloadedmetadata = () => {
-      const duration = video.duration;
-      URL.revokeObjectURL(url);
-      resolve(duration);
-    };
+      const video =
+        document.createElement(
+          "video"
+        );
 
-    video.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(
-        new Error("មិនអាចអាន video duration")
-      );
-    };
+      video.preload =
+        "metadata";
 
-    video.src = url;
-  });
+      video.onloadedmetadata =
+        () => {
+          const duration =
+            video.duration;
+
+          URL.revokeObjectURL(
+            url
+          );
+
+          resolve(
+            duration
+          );
+        };
+
+      video.onerror = () => {
+        URL.revokeObjectURL(
+          url
+        );
+
+        reject(
+          new Error(
+            "មិនអាចអាន video duration"
+          )
+        );
+      };
+
+      video.src = url;
+    }
+  );
 }
 
 /* =========================
    FFMPEG
 ========================= */
 
-async function getFFmpeg(setStatus) {
-  if (ffmpegInstance) return ffmpegInstance;
+async function getFFmpeg(
+  setStatus
+) {
+  if (ffmpegInstance) {
+    return ffmpegInstance;
+  }
 
-  setStatus("🎬 កំពុងផ្ទុក FFmpeg...");
+  setStatus(
+    "🎬 កំពុងផ្ទុក FFmpeg..."
+  );
 
-  const ffmpeg = new FFmpeg();
+  const ffmpeg =
+    new FFmpeg();
 
   const baseURL =
     "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
 
   await ffmpeg.load({
-    coreURL: await toBlobURL(
-      `${baseURL}/ffmpeg-core.js`,
-      "text/javascript"
-    ),
+    coreURL:
+      await toBlobURL(
+        `${baseURL}/ffmpeg-core.js`,
+        "text/javascript"
+      ),
 
-    wasmURL: await toBlobURL(
-      `${baseURL}/ffmpeg-core.wasm`,
-      "application/wasm"
-    ),
+    wasmURL:
+      await toBlobURL(
+        `${baseURL}/ffmpeg-core.wasm`,
+        "application/wasm"
+      ),
   });
 
-  ffmpegInstance = ffmpeg;
+  ffmpegInstance =
+    ffmpeg;
 
   return ffmpeg;
 }
@@ -370,21 +613,41 @@ async function createDubbingVideo(
   setStatus
 ) {
   const duration =
-    await getVideoDuration(videoFile);
+    await getVideoDuration(
+      videoFile
+    );
 
-  const sampleRate = 22050;
+  const sampleRate =
+    22050;
 
   const master =
     new Float32Array(
-      Math.ceil(duration * sampleRate)
+      Math.ceil(
+        duration *
+          sampleRate
+      )
     );
 
-  for (let i = 0; i < caption.length; i++) {
-    const item = caption[i];
-    const khmer = item.khmer?.trim();
+  for (
+    let i = 0;
+    i < caption.length;
+    i++
+  ) {
+    const item =
+      caption[i];
+
+    const khmer =
+      item.khmer?.trim();
 
     if (!khmer) continue;
-    if (khmer.startsWith("⚠️")) continue;
+
+    if (
+      khmer.startsWith(
+        "⚠️"
+      )
+    ) {
+      continue;
+    }
 
     setStatus(
       `🗣️ បង្កើតសំឡេងខ្មែរ ${i + 1}/${caption.length}...`
@@ -396,15 +659,25 @@ async function createDubbingVideo(
         setStatus
       );
 
-    if (!pcm.length) continue;
+    if (!pcm.length) {
+      continue;
+    }
 
     const start =
-      Math.max(0, Number(item.start) || 0);
+      Math.max(
+        0,
+        Number(
+          item.start
+        ) || 0
+      );
 
     const end =
       Math.max(
         start + 0.35,
-        Number(item.end) || start + 1
+        Number(
+          item.end
+        ) ||
+          start + 1
       );
 
     const fitted =
@@ -415,33 +688,64 @@ async function createDubbingVideo(
       );
 
     const startSample =
-      Math.floor(start * sampleRate);
+      Math.floor(
+        start *
+          sampleRate
+      );
 
-    for (let j = 0; j < fitted.length; j++) {
-      const index = startSample + j;
+    for (
+      let j = 0;
+      j < fitted.length;
+      j++
+    ) {
+      const index =
+        startSample + j;
 
-      if (index >= master.length) break;
+      if (
+        index >=
+        master.length
+      ) {
+        break;
+      }
 
-      master[index] += fitted[j];
+      master[index] +=
+        fitted[j];
     }
   }
 
   let peak = 0;
 
-  for (const sample of master) {
-    peak = Math.max(
-      peak,
-      Math.abs(sample)
-    );
+  for (
+    let i = 0;
+    i < master.length;
+    i++
+  ) {
+    peak =
+      Math.max(
+        peak,
+        Math.abs(
+          master[i]
+        )
+      );
   }
 
   if (peak > 0.95) {
-    const scale = 0.95 / peak;
+    const scale =
+      0.95 / peak;
 
-    for (let i = 0; i < master.length; i++) {
-      master[i] *= scale;
+    for (
+      let i = 0;
+      i < master.length;
+      i++
+    ) {
+      master[i] *=
+        scale;
     }
   }
+
+  setStatus(
+    "🎵 កំពុងបញ្ចូលសំឡេងខ្មែរ..."
+  );
 
   const wav =
     floatToWav(
@@ -450,20 +754,28 @@ async function createDubbingVideo(
     );
 
   const ffmpeg =
-    await getFFmpeg(setStatus);
+    await getFFmpeg(
+      setStatus
+    );
 
   const extension =
     videoFile.name
       .split(".")
       .pop()
-      ?.toLowerCase() || "mp4";
+      ?.toLowerCase() ||
+    "mp4";
 
   const inputName =
     `input.${extension}`;
 
+  const outputName =
+    "smey-khmer-dubbing.mp4";
+
   await ffmpeg.writeFile(
     inputName,
-    await fetchFile(videoFile)
+    await fetchFile(
+      videoFile
+    )
   );
 
   await ffmpeg.writeFile(
@@ -471,40 +783,81 @@ async function createDubbingVideo(
     wav
   );
 
-  setStatus("🎬 កំពុងបង្កើត MP4...");
+  setStatus(
+    "🎬 កំពុងបង្កើត MP4..."
+  );
 
-  const outputName =
-    "smey-khmer-dubbing.mp4";
+  try {
+    await ffmpeg.exec([
+      "-i",
+      inputName,
 
-  await ffmpeg.exec([
-    "-i",
-    inputName,
+      "-i",
+      "khmer_voice.wav",
 
-    "-i",
-    "khmer_voice.wav",
+      "-filter_complex",
+      "[0:a]volume=0.30[original];[1:a]volume=1.00[voice];[original][voice]amix=inputs=2:duration=first:dropout_transition=0[a]",
 
-    "-filter_complex",
-    "[0:a]volume=0.30[original];[1:a]volume=1.00[voice];[original][voice]amix=inputs=2:duration=first:dropout_transition=0[a]",
+      "-map",
+      "0:v:0",
 
-    "-map",
-    "0:v:0",
+      "-map",
+      "[a]",
 
-    "-map",
-    "[a]",
+      "-c:v",
+      "copy",
 
-    "-c:v",
-    "copy",
+      "-c:a",
+      "aac",
 
-    "-c:a",
-    "aac",
+      "-b:a",
+      "192k",
 
-    "-b:a",
-    "192k",
+      "-shortest",
 
-    "-shortest",
+      outputName,
+    ]);
+  } catch (error) {
+    console.warn(
+      "Trying video re-encode..."
+    );
 
-    outputName,
-  ]);
+    await ffmpeg.exec([
+      "-i",
+      inputName,
+
+      "-i",
+      "khmer_voice.wav",
+
+      "-filter_complex",
+      "[0:a]volume=0.30[original];[1:a]volume=1.00[voice];[original][voice]amix=inputs=2:duration=first:dropout_transition=0[a]",
+
+      "-map",
+      "0:v:0",
+
+      "-map",
+      "[a]",
+
+      "-c:v",
+      "libx264",
+
+      "-preset",
+      "ultrafast",
+
+      "-crf",
+      "28",
+
+      "-c:a",
+      "aac",
+
+      "-b:a",
+      "192k",
+
+      "-shortest",
+
+      outputName,
+    ]);
+  }
 
   const output =
     await ffmpeg.readFile(
@@ -512,8 +865,11 @@ async function createDubbingVideo(
     );
 
   return new Blob(
-    [output.buffer],
-    { type: "video/mp4" }
+    [output],
+    {
+      type:
+        "video/mp4",
+    }
   );
 }
 
@@ -521,7 +877,9 @@ async function createDubbingVideo(
    TIME
 ========================= */
 
-function formatTime(seconds) {
+function formatTime(
+  seconds
+) {
   if (
     seconds == null ||
     Number.isNaN(seconds)
@@ -530,40 +888,71 @@ function formatTime(seconds) {
   }
 
   const total =
-    Math.max(0, Math.floor(seconds));
+    Math.max(
+      0,
+      Math.floor(seconds)
+    );
 
   const minutes =
-    Math.floor(total / 60);
+    Math.floor(
+      total / 60
+    );
 
   const secs =
     total % 60;
 
-  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  return `${String(
+    minutes
+  ).padStart(
+    2,
+    "0"
+  )}:${String(
+    secs
+  ).padStart(
+    2,
+    "0"
+  )}`;
 }
 
 /* =========================
    REMOVE DUPLICATES
 ========================= */
 
-function cleanChunks(chunks) {
+function cleanChunks(
+  chunks
+) {
   const result = [];
   let previous = "";
 
-  for (const item of chunks) {
+  for (
+    const item of chunks
+  ) {
     const normalized =
       item.text
         .toLowerCase()
-        .replace(/\s+/g, " ")
+        .replace(
+          /\s+/g,
+          " "
+        )
         .trim();
 
-    if (!normalized) continue;
-
-    if (normalized === previous) {
+    if (!normalized) {
       continue;
     }
 
-    previous = normalized;
-    result.push(item);
+    if (
+      normalized ===
+      previous
+    ) {
+      continue;
+    }
+
+    previous =
+      normalized;
+
+    result.push(
+      item
+    );
   }
 
   return result;
@@ -574,20 +963,35 @@ function cleanChunks(chunks) {
 ========================= */
 
 function App() {
-  const [video, setVideo] = useState(null);
-  const [videoUrl, setVideoUrl] = useState("");
-  const [status, setStatus] =
-    useState("រង់ចាំវីដេអូ...");
+  const [video, setVideo] =
+    useState(null);
 
-  const [busy, setBusy] = useState(false);
+  const [videoUrl, setVideoUrl] =
+    useState("");
+
+  const [status, setStatus] =
+    useState(
+      "រង់ចាំវីដេអូ..."
+    );
+
+  const [busy, setBusy] =
+    useState(false);
+
   const [dubbingBusy, setDubbingBusy] =
     useState(false);
 
-  const [caption, setCaption] = useState([]);
+  const [caption, setCaption] =
+    useState([]);
+
   const [sourceLang, setSourceLang] =
-    useState("eng_Latn");
+    useState(
+      "eng_Latn"
+    );
 
   const [downloadUrl, setDownloadUrl] =
+    useState("");
+
+  const [outputVideoUrl, setOutputVideoUrl] =
     useState("");
 
   useEffect(() => {
@@ -597,26 +1001,45 @@ function App() {
     }
 
     const url =
-      URL.createObjectURL(video);
+      URL.createObjectURL(
+        video
+      );
 
     setVideoUrl(url);
 
     return () =>
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(
+        url
+      );
   }, [video]);
 
-  function handleVideo(event) {
+  function handleVideo(
+    event
+  ) {
     const file =
       event.target.files?.[0];
 
-    if (!file) return;
+    if (!file) {
+      return;
+    }
 
     if (downloadUrl) {
-      URL.revokeObjectURL(downloadUrl);
+      URL.revokeObjectURL(
+        downloadUrl
+      );
+    }
+
+    if (outputVideoUrl) {
+      URL.revokeObjectURL(
+        outputVideoUrl
+      );
     }
 
     setDownloadUrl("");
+    setOutputVideoUrl("");
+
     setVideo(file);
+
     setCaption([]);
 
     setStatus(
@@ -629,10 +1052,12 @@ function App() {
       setStatus(
         "សូមបញ្ចូលវីដេអូជាមុនសិន។"
       );
+
       return;
     }
 
     setBusy(true);
+
     setCaption([]);
 
     try {
@@ -641,48 +1066,91 @@ function App() {
       );
 
       const audio =
-        await videoToAudio(video);
+        await videoToAudio(
+          video
+        );
+
+      if (
+        !(audio instanceof
+          Float32Array)
+      ) {
+        throw new Error(
+          "Audio format មិនត្រឹមត្រូវ"
+        );
+      }
+
+      if (!audio.length) {
+        throw new Error(
+          "មិនមានសំឡេងក្នុងវីដេអូ"
+        );
+      }
 
       setStatus(
         "🤖 កំពុងដំណើរការ Whisper Tiny..."
       );
 
       const whisper =
-        await getTranscriber(setStatus);
+        await getTranscriber(
+          setStatus
+        );
 
       const result =
-        await whisper(audio, {
-          return_timestamps: true,
-          chunk_length_s: 30,
-          stride_length_s: 5,
-        });
+        await whisper(
+          audio,
+          {
+            return_timestamps:
+              true,
+
+            chunk_length_s:
+              30,
+
+            stride_length_s:
+              5,
+          }
+        );
 
       let chunks =
-        (result.chunks || [])
-          .map((item) => ({
-            start:
-              item.timestamp?.[0] ?? 0,
+        (
+          result.chunks ||
+          []
+        )
+          .map(
+            (item) => ({
+              start:
+                item.timestamp?.[0] ??
+                0,
 
-            end:
-              item.timestamp?.[1] ?? 0,
+              end:
+                item.timestamp?.[1] ??
+                0,
 
-            text:
-              item.text?.trim() || "",
+              text:
+                item.text?.trim() ||
+                "",
 
-            khmer: "",
-          }))
+              khmer:
+                "",
+            })
+          )
           .filter(
-            (item) => item.text
+            (item) =>
+              item.text
           );
 
-      chunks = cleanChunks(chunks);
+      chunks =
+        cleanChunks(
+          chunks
+        );
 
-      setCaption(chunks);
+      setCaption(
+        chunks
+      );
 
       if (!chunks.length) {
         setStatus(
           "⚠️ មិនរកឃើញសំឡេងនិយាយទេ។"
         );
+
         return;
       }
 
@@ -702,26 +1170,33 @@ function App() {
               sourceLang
             );
 
-          chunks[i].khmer = khmer;
-
-          setCaption(
-            [...chunks]
+          chunks[i].khmer =
+            khmer;
+        } catch (
+          error
+        ) {
+          console.error(
+            error
           );
-        } catch {
+
           chunks[i].khmer =
             "⚠️ បកប្រែមិនបាន";
-
-          setCaption(
-            [...chunks]
-          );
         }
+
+        setCaption(
+          [...chunks]
+        );
       }
 
       setStatus(
         `✅ Caption + Khmer រួចរាល់ — ${chunks.length} ផ្នែក`
       );
-    } catch (error) {
-      console.error(error);
+    } catch (
+      error
+    ) {
+      console.error(
+        error
+      );
 
       setStatus(
         `❌ មានបញ្ហា៖ ${
@@ -730,25 +1205,43 @@ function App() {
         }`
       );
     } finally {
-      setBusy(false);
+      setBusy(
+        false
+      );
     }
   }
 
   async function handleDubbing() {
-    if (!video || !caption.length) {
+    if (
+      !video ||
+      !caption.length
+    ) {
       setStatus(
         "សូមបង្កើត Caption ជាមុនសិន។"
       );
+
       return;
     }
 
-    setDubbingBusy(true);
+    setDubbingBusy(
+      true
+    );
 
     try {
       if (downloadUrl) {
-        URL.revokeObjectURL(downloadUrl);
-        setDownloadUrl("");
+        URL.revokeObjectURL(
+          downloadUrl
+        );
       }
+
+      if (outputVideoUrl) {
+        URL.revokeObjectURL(
+          outputVideoUrl
+        );
+      }
+
+      setDownloadUrl("");
+      setOutputVideoUrl("");
 
       const blob =
         await createDubbingVideo(
@@ -758,15 +1251,27 @@ function App() {
         );
 
       const url =
-        URL.createObjectURL(blob);
+        URL.createObjectURL(
+          blob
+        );
 
-      setDownloadUrl(url);
+      setDownloadUrl(
+        url
+      );
+
+      setOutputVideoUrl(
+        url
+      );
 
       setStatus(
-        "✅ MP4 រួចរាល់ — ចុច Download MP4 ខាងក្រោម!"
+        "✅ MP4 រួចរាល់ — វីដេអូបង្ហាញខាងក្រោមហើយ!"
       );
-    } catch (error) {
-      console.error(error);
+    } catch (
+      error
+    ) {
+      console.error(
+        error
+      );
 
       setStatus(
         `❌ Dubbing error៖ ${
@@ -775,7 +1280,9 @@ function App() {
         }`
       );
     } finally {
-      setDubbingBusy(false);
+      setDubbingBusy(
+        false
+      );
     }
   }
 
@@ -799,7 +1306,9 @@ function App() {
           <input
             type="file"
             accept="video/mp4,video/mov,video/webm,video/mkv"
-            onChange={handleVideo}
+            onChange={
+              handleVideo
+            }
           />
         </label>
 
@@ -815,20 +1324,32 @@ function App() {
                   video.size /
                   1024 /
                   1024
-                ).toFixed(1)} MB
+                ).toFixed(
+                  1
+                )}{" "}
+                MB
               </small>
             </div>
 
             {videoUrl && (
               <video
-                src={videoUrl}
+                src={
+                  videoUrl
+                }
                 controls
                 playsInline
+                preload="metadata"
                 style={{
-                  width: "100%",
-                  marginTop: "16px",
-                  borderRadius: "14px",
-                  background: "#000",
+                  width:
+                    "100%",
+                  marginTop:
+                    "16px",
+                  borderRadius:
+                    "14px",
+                  display:
+                    "block",
+                  background:
+                    "#000",
                 }}
               />
             )}
@@ -837,10 +1358,14 @@ function App() {
 
         <div
           style={{
-            marginTop: "14px",
-            padding: "12px",
-            borderRadius: "12px",
-            background: "#334155",
+            marginTop:
+              "14px",
+            padding:
+              "12px",
+            borderRadius:
+              "12px",
+            background:
+              "#334155",
           }}
         >
           <strong>
@@ -848,17 +1373,29 @@ function App() {
           </strong>
 
           <select
-            value={sourceLang}
-            onChange={(e) =>
-              setSourceLang(e.target.value)
+            value={
+              sourceLang
             }
-            disabled={busy || dubbingBusy}
+            onChange={(e) =>
+              setSourceLang(
+                e.target.value
+              )
+            }
+            disabled={
+              busy ||
+              dubbingBusy
+            }
             style={{
-              width: "100%",
-              marginTop: "8px",
-              padding: "10px",
-              borderRadius: "10px",
-              fontSize: "16px",
+              width:
+                "100%",
+              marginTop:
+                "8px",
+              padding:
+                "10px",
+              borderRadius:
+                "10px",
+              fontSize:
+                "16px",
             }}
           >
             <option value="eng_Latn">
@@ -873,21 +1410,33 @@ function App() {
 
         <button
           className="start"
-          onClick={start}
-          disabled={busy || dubbingBusy}
+          onClick={
+            start
+          }
+          disabled={
+            busy ||
+            dubbingBusy
+          }
         >
           {busy
             ? "⏳ កំពុងដំណើរការ..."
             : "▶️ ចាប់ផ្ដើម"}
         </button>
 
-        {caption.length > 0 && (
+        {caption.length >
+          0 && (
           <button
             className="start"
-            onClick={handleDubbing}
-            disabled={busy || dubbingBusy}
+            onClick={
+              handleDubbing
+            }
+            disabled={
+              busy ||
+              dubbingBusy
+            }
             style={{
-              marginTop: "10px",
+              marginTop:
+                "10px",
             }}
           >
             {dubbingBusy
@@ -896,78 +1445,164 @@ function App() {
           </button>
         )}
 
-        {downloadUrl && (
-          <a
-            href={downloadUrl}
-            download="smey-khmer-dubbing.mp4"
-            style={{
-              display: "block",
-              marginTop: "10px",
-              padding: "14px",
-              borderRadius: "12px",
-              background: "#16a34a",
-              color: "#fff",
-              textAlign: "center",
-              textDecoration: "none",
-              fontWeight: "800",
-              fontSize: "17px",
-            }}
-          >
-            📥 Download MP4
-          </a>
-        )}
-
         <div className="status">
           {status}
         </div>
 
-        {caption.length > 0 && (
-          <div style={{ marginTop: "18px" }}>
+        {/* =========================
+            GENERATED VIDEO
+        ========================= */}
+
+        {outputVideoUrl && (
+          <div
+            style={{
+              marginTop:
+                "18px",
+            }}
+          >
+            <h3>
+              🎬 វីដេអូ Khmer Dubbing
+            </h3>
+
+            <video
+              src={
+                outputVideoUrl
+              }
+              controls
+              playsInline
+              preload="metadata"
+              style={{
+                width:
+                  "100%",
+                borderRadius:
+                  "14px",
+                display:
+                  "block",
+                background:
+                  "#000",
+              }}
+            />
+
+            {downloadUrl && (
+              <a
+                href={
+                  downloadUrl
+                }
+                download="smey-khmer-dubbing.mp4"
+                style={{
+                  display:
+                    "block",
+                  marginTop:
+                    "12px",
+                  padding:
+                    "15px",
+                  borderRadius:
+                    "12px",
+                  background:
+                    "#16a34a",
+                  color:
+                    "#fff",
+                  textAlign:
+                    "center",
+                  textDecoration:
+                    "none",
+                  fontWeight:
+                    "800",
+                  fontSize:
+                    "17px",
+                }}
+              >
+                📥 Download MP4
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* =========================
+            CLEAN TIMELINE
+        ========================= */}
+
+        {caption.length >
+          0 && (
+          <div
+            style={{
+              marginTop:
+                "18px",
+            }}
+          >
             <h3>
               ⏱️ Caption Timeline
             </h3>
 
             {caption.map(
-              (item, index) => (
+              (
+                item,
+                index
+              ) => (
                 <div
-                  key={index}
+                  key={
+                    index
+                  }
                   style={{
-                    marginBottom: "10px",
-                    padding: "13px",
-                    borderRadius: "12px",
-                    background: "#334155",
+                    marginBottom:
+                      "10px",
+                    padding:
+                      "13px",
+                    borderRadius:
+                      "12px",
+                    background:
+                      "#334155",
                   }}
                 >
                   <small
                     style={{
-                      opacity: 0.8,
+                      opacity:
+                        0.8,
                     }}
                   >
-                    {formatTime(item.start)}
+                    {
+                      formatTime(
+                        item.start
+                      )
+                    }
                     {" → "}
-                    {formatTime(item.end)}
+                    {
+                      formatTime(
+                        item.end
+                      )
+                    }
                   </small>
 
                   <div
                     style={{
-                      marginTop: "7px",
-                      fontWeight: "600",
+                      marginTop:
+                        "7px",
+                      fontWeight:
+                        "600",
                     }}
                   >
-                    {item.text}
+                    {
+                      item.text
+                    }
                   </div>
 
                   {item.khmer && (
                     <div
                       style={{
-                        marginTop: "8px",
-                        paddingTop: "8px",
+                        marginTop:
+                          "8px",
+                        paddingTop:
+                          "8px",
                         borderTop:
                           "1px solid rgba(255,255,255,.15)",
-                        fontWeight: "700",
+                        fontWeight:
+                          "700",
                       }}
                     >
-                      🇰🇭 {item.khmer}
+                      🇰🇭{" "}
+                      {
+                        item.khmer
+                      }
                     </div>
                   )}
                 </div>
@@ -977,12 +1612,29 @@ function App() {
         )}
 
         <div className="features">
-          <div>🎙️ Whisper Speech → Caption</div>
-          <div>🇰🇭 Khmer Translation</div>
-          <div>🗣️ Khmer Voice</div>
-          <div>🎬 Timing Sync</div>
-          <div>🎵 Original Audio/Music</div>
-          <div>📥 MP4 Download</div>
+          <div>
+            🎙️ Whisper Speech → Caption
+          </div>
+
+          <div>
+            🇰🇭 Khmer Translation
+          </div>
+
+          <div>
+            🗣️ Khmer Voice
+          </div>
+
+          <div>
+            🎬 Timing Sync
+          </div>
+
+          <div>
+            🎵 Original Audio/Music
+          </div>
+
+          <div>
+            📥 MP4 Download
+          </div>
         </div>
 
       </section>
@@ -991,7 +1643,9 @@ function App() {
 }
 
 createRoot(
-  document.getElementById("root")
+  document.getElementById(
+    "root"
+  )
 ).render(
   <React.StrictMode>
     <App />
