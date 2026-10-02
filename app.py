@@ -22,15 +22,7 @@ st.set_page_config(
     page_icon="🇰🇭",
 )
 
-LOGO_FILE = "file_00000000568c8211831d7859c11ddf61.png"
-
-if os.path.exists(LOGO_FILE):
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.image(LOGO_FILE, width=300)
-
 st.title("🇰🇭 Smey Auto Caption")
-st.write("Local AI → Accurate Caption → Khmer Translation → Khmer Dubbing → MP4")
 
 
 # =========================================================
@@ -430,7 +422,7 @@ def burn_caption(video_path, ass_path, output_path):
 # =========================================================
 
 source_language = st.selectbox(
-    "🌐 ភាសាដើម",
+    "🌐 ភាសាវីដេអូ",
     [
         "Auto Detect",
         "🇰🇭 ខ្មែរ",
@@ -443,7 +435,7 @@ source_language = st.selectbox(
 )
 
 target_language = st.selectbox(
-    "🎯 បកប្រែទៅជា",
+    "🎯 បកប្រែទៅ",
     [
         "មិនបកប្រែ",
         "🇰🇭 ខ្មែរ",
@@ -461,15 +453,15 @@ target_language = st.selectbox(
 # =========================================================
 
 st.divider()
-st.subheader("🗣️ Khmer Dubbing")
+st.subheader("🗣️ និយាយខ្មែរ")
 
 khmer_dubbing = st.checkbox(
-    "🗣️ និយាយខ្មែរ + រក្សា Background Music",
+    "បើកសំឡេងខ្មែរ + រក្សាសំឡេងដើម",
     value=False,
 )
 
 khmer_voice = st.selectbox(
-    "🎙️ សំឡេងខ្មែរ",
+    "🎙️ សំឡេង",
     [
         "km-KH-PisethNeural",
         "km-KH-SreymomNeural",
@@ -478,7 +470,7 @@ khmer_voice = st.selectbox(
 )
 
 khmer_rate = st.select_slider(
-    "⚡ ល្បឿនសំឡេង",
+    "⚡ ល្បឿន",
     options=["+0%", "+10%", "+15%", "+20%", "+25%"],
     value="+15%",
     disabled=not khmer_dubbing,
@@ -486,33 +478,12 @@ khmer_rate = st.select_slider(
 
 original_audio_volume = 0.05
 
-if khmer_dubbing:
-    st.caption(
-        "សំឡេងខ្មែរចាប់ផ្ដើមតាម Caption timestamp។ "
-        "សំឡេងដើមត្រូវបានបន្ថយខ្លាំង ដើម្បីឲ្យសំឡេងខ្មែរលេចច្បាស់។"
-    )
-    st.info(
-        "ℹ️ Version នេះមិនអាចបំបែក Voice និង Background Music ដាច់ពីគ្នាបានល្អ "
-        "ដោយ FFmpeg តែមួយទេ។ ដូច្នេះ Original audio ត្រូវបានបន្ថយមក 5% "
-        "ដើម្បីកុំឲ្យសំឡេងមនុស្សដើមរំខាន។"
-    )
-    st.warning(
-        "⚠️ Version នេះធ្វើ Audio/Timing Sync ប៉ុណ្ណោះ។ "
-        "វាមិនធ្វើឲ្យមាត់តួអង្គផ្លាស់ទីតាមសំឡេងទេ។"
-    )
-
-st.info(
-    "🆓 Local AI Mode: Caption + Translation មិនប្រើ Gemini API។ "
-    "Whisper large-v3-turbo + NLLB-200 INT8 + Edge TTS ដំណើរការដោយមិនដក Gemini quota។"
-)
-
-
 # =========================================================
 # VIDEO UPLOAD
 # =========================================================
 
 video = st.file_uploader(
-    "🎥 ជ្រើសវីដេអូ",
+    "🎥 បញ្ចូលវីដេអូ",
     type=["mp4", "mov", "mkv", "webm"],
 )
 
@@ -524,7 +495,7 @@ video = st.file_uploader(
 if video is not None:
 
     caption_clicked = st.button(
-        "⚡ បង្កើត Caption",
+        "▶️ ចាប់ផ្ដើម",
         use_container_width=True,
     )
 
@@ -658,7 +629,7 @@ if video is not None:
                 st.video(output_data)
 
                 st.download_button(
-                    "⬇️ ទាញយកវីដេអូ MP4",
+                    "⬇️ ទាញយក MP4",
                     data=output_data,
                     file_name="smey_auto_caption.mp4",
                     mime="video/mp4",
