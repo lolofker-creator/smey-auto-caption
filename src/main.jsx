@@ -18,35 +18,59 @@ async function getTranscriber(setStatus) {
   return transcriber;
 }
 
+function resampleAudio(input, fromRate, toRate) {
+  if (fromRate === toRate) {
+    return input;
+  }
+
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(input.length / ratio);
+  const output = new Float32Array(newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const position = i * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, input.length - 1);
+    const weight = position - left;
+
+    output[i] =
+      input[left] * (1 - weight) +
+      input[right] * weight;
+  }
+
+  return output;
+}
+
 async function videoToAudio(videoFile) {
   const arrayBuffer = await videoFile.arrayBuffer();
 
   const audioContext = new AudioContext();
-  const source = audioContext.createBufferSource();
 
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-  source.buffer = audioBuffer;
+  const audioBuffer =
+    await audioContext.decodeAudioData(arrayBuffer);
 
   const channels = audioBuffer.numberOfChannels;
   const length = audioBuffer.length;
 
   const mono = new Float32Array(length);
 
-  for (let ch = 0; ch < channels; ch++) {
-    const data = audioBuffer.getChannelData(ch);
+  for (let channel = 0; channel < channels; channel++) {
+    const data = audioBuffer.getChannelData(channel);
 
     for (let i = 0; i < length; i++) {
       mono[i] += data[i] / channels;
     }
   }
 
+  const audio16k = resampleAudio(
+    mono,
+    audioBuffer.sampleRate,
+    16000
+  );
+
   await audioContext.close();
 
-  return {
-    audio: mono,
-    sampling_rate: audioBuffer.sampleRate,
-  };
+  return audio16k;
 }
 
 function formatTime(seconds) {
@@ -54,14 +78,13 @@ function formatTime(seconds) {
     return "00:00";
   }
 
-  const total = Math.floor(seconds);
+  const total = Math.max(0, Math.floor(seconds));
   const minutes = Math.floor(total / 60);
   const secs = total % 60;
 
-  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(
-    2,
-    "0"
-  )}`;
+  return `${String(minutes).padStart(2, "0")}:${String(
+    secs
+  ).padStart(2, "0")}`;
 }
 
 function App() {
@@ -69,8 +92,8 @@ function App() {
   const [videoUrl, setVideoUrl] = useState("");
   const [status, setStatus] = useState("រង់ចាំវីដេអូ...");
   const [busy, setBusy] = useState(false);
-  const [caption, setCaption] = useState([]);
   const [text, setText] = useState("");
+  const [caption, setCaption] = useState([]);
 
   useEffect(() => {
     if (!video) {
@@ -81,17 +104,19 @@ function App() {
     const url = URL.createObjectURL(video);
     setVideoUrl(url);
 
-    return () => URL.revokeObjectURL(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
   }, [video]);
 
-  function handleVideo(e) {
-    const file = e.target.files?.[0];
+  function handleVideo(event) {
+    const file = event.target.files?.[0];
 
     if (!file) return;
 
     setVideo(file);
-    setCaption([]);
     setText("");
+    setCaption([]);
     setStatus(`បានជ្រើស៖ ${file.name}`);
   }
 
@@ -102,13 +127,21 @@ function App() {
     }
 
     setBusy(true);
-    setCaption([]);
     setText("");
+    setCaption([]);
 
     try {
-      setStatus("🎧 កំពុងយកសំឡេងចេញពីវីដេអូ...");
+      setStatus("🎧 កំពុងអានសំឡេងពីវីដេអូ...");
 
       const audio = await videoToAudio(video);
+
+      if (!(audio instanceof Float32Array)) {
+        throw new Error("Audio format មិនត្រឹមត្រូវ");
+      }
+
+      if (audio.length === 0) {
+        throw new Error("មិនមានសំឡេងក្នុងវីដេអូ");
+      }
 
       setStatus("🤖 កំពុងដំណើរការ Whisper Tiny...");
 
@@ -120,23 +153,30 @@ function App() {
         stride_length_s: 5,
       });
 
-      const chunks = (result.chunks || []).map((item) => ({
-        start: item.timestamp?.[0] ?? 0,
-        end: item.timestamp?.[1] ?? 0,
-        text: item.text?.trim() || "",
-      }));
+      const chunks = (result.chunks || [])
+        .map((item) => ({
+          start: item.timestamp?.[0] ?? 0,
+          end: item.timestamp?.[1] ?? 0,
+          text: item.text?.trim() || "",
+        }))
+        .filter((item) => item.text);
 
-      setCaption(chunks);
       setText(result.text?.trim() || "");
+      setCaption(chunks);
 
-      if (chunks.length > 0) {
-        setStatus(`✅ Caption រួចរាល់ ${chunks.length} ផ្នែក`);
+      if (result.text?.trim()) {
+        setStatus(
+          `✅ Caption រួចរាល់ — ${chunks.length} ផ្នែក`
+        );
       } else {
         setStatus("⚠️ Whisper មិនរកឃើញសំឡេងនិយាយទេ។");
       }
     } catch (error) {
       console.error(error);
-      setStatus(`❌ មានបញ្ហា៖ ${error.message}`);
+
+      setStatus(
+        `❌ មានបញ្ហា៖ ${error?.message || "Unknown error"}`
+      );
     } finally {
       setBusy(false);
     }
@@ -193,7 +233,9 @@ function App() {
           onClick={start}
           disabled={busy}
         >
-          {busy ? "⏳ កំពុងដំណើរការ..." : "▶️ ចាប់ផ្ដើម"}
+          {busy
+            ? "⏳ កំពុងដំណើរការ..."
+            : "▶️ ចាប់ផ្ដើម"}
         </button>
 
         <div className="status">
@@ -210,7 +252,9 @@ function App() {
               lineHeight: "1.8",
             }}
           >
-            <strong>📝 អត្ថបទដែល Whisper ស្គាល់៖</strong>
+            <strong>
+              📝 Whisper Caption:
+            </strong>
 
             <div style={{ marginTop: "10px" }}>
               {text}
@@ -220,7 +264,7 @@ function App() {
 
         {caption.length > 0 && (
           <div style={{ marginTop: "16px" }}>
-            <h3>🇰🇭 Caption Timeline</h3>
+            <h3>⏱️ Caption Timeline</h3>
 
             {caption.map((item, index) => (
               <div
@@ -233,7 +277,8 @@ function App() {
                 }}
               >
                 <small>
-                  {formatTime(item.start)} → {formatTime(item.end)}
+                  {formatTime(item.start)} →{" "}
+                  {formatTime(item.end)}
                 </small>
 
                 <div style={{ marginTop: "4px" }}>
