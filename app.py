@@ -30,14 +30,14 @@ if os.path.exists(LOGO_FILE):
         st.image(LOGO_FILE, width=300)
 
 st.title("🇰🇭 Smey Auto Caption")
-st.write("Local AI → Caption → Auto Translate → Khmer Dubbing → MP4")
+st.write("Local AI → Accurate Caption → Khmer Translation → Khmer Dubbing → MP4")
 
 
 # =========================================================
 # LOCAL MODELS
 # =========================================================
 
-ASR_MODEL = "small"
+ASR_MODEL = "large-v3-turbo"
 TRANSLATION_MODEL = "solavr/small100-ctranslate2-int8"
 
 LANGUAGE_CODES = {
@@ -125,11 +125,18 @@ def transcribe_local(audio_path, source_language):
         audio_path,
         language=whisper_language,
         task="transcribe",
-        beam_size=1,
+        beam_size=3,
         best_of=1,
         temperature=0,
         vad_filter=True,
-        condition_on_previous_text=False,
+        vad_parameters=dict(min_silence_duration_ms=350),
+        condition_on_previous_text=True,
+        initial_prompt=(
+            "Chinese dialogue from a short drama. "
+            "Transcribe the spoken words exactly; do not translate."
+            if source_language == "🇨🇳 中文"
+            else None
+        ),
     )
 
     groups = []
@@ -411,10 +418,17 @@ khmer_rate = st.select_slider(
     disabled=not khmer_dubbing,
 )
 
+original_audio_volume = 0.05
+
 if khmer_dubbing:
     st.caption(
         "សំឡេងខ្មែរចាប់ផ្ដើមតាម Caption timestamp។ "
-        "សំឡេង/តន្ត្រីដើមនៅដដែល ប៉ុន្តែបន្ថយ volume ខាងក្រោយ។"
+        "សំឡេងដើមត្រូវបានបន្ថយខ្លាំង ដើម្បីឲ្យសំឡេងខ្មែរលេចច្បាស់។"
+    )
+    st.info(
+        "ℹ️ Version នេះមិនអាចបំបែក Voice និង Background Music ដាច់ពីគ្នាបានល្អ "
+        "ដោយ FFmpeg តែមួយទេ។ ដូច្នេះ Original audio ត្រូវបានបន្ថយមក 5% "
+        "ដើម្បីកុំឲ្យសំឡេងមនុស្សដើមរំខាន។"
     )
     st.warning(
         "⚠️ Version នេះធ្វើ Audio/Timing Sync ប៉ុណ្ណោះ។ "
@@ -423,7 +437,7 @@ if khmer_dubbing:
 
 st.info(
     "🆓 Local AI Mode: Caption + Translation មិនប្រើ Gemini API។ "
-    "ដូច្នេះវាមិនដក Gemini quota ពេលបង្កើតវីដេអូទេ។"
+    "Whisper large-v3-turbo + Local Translator + Edge TTS ដំណើរការដោយមិនដក Gemini quota។"
 )
 
 
@@ -534,7 +548,7 @@ if video is not None:
                             dubbed_audio_path,
                             voice=khmer_voice,
                             rate=khmer_rate,
-                            original_volume=0.22,
+                            original_volume=original_audio_volume,
                         )
 
                     run_ffmpeg([
