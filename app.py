@@ -7,6 +7,7 @@ import shutil
 import streamlit as st
 import imageio_ffmpeg
 import edge_tts
+from gtts import gTTS
 from faster_whisper import WhisperModel
 import ctranslate2
 import sentencepiece as spm
@@ -222,12 +223,42 @@ def translate_local(groups, source_code, target_code):
 # =========================================================
 
 async def _tts_one(text, output_path, voice, rate):
-    communicate = edge_tts.Communicate(
-        text=text,
-        voice=voice,
-        rate=rate,
-    )
-    await communicate.save(output_path)
+    # Try Edge TTS first. If Microsoft returns NoAudioReceived,
+    # automatically fall back to Google TTS so the job can continue.
+    try:
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice,
+            rate=rate,
+        )
+        await communicate.save(output_path)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return
+    except Exception:
+        pass
+
+    # Reliable fallback for Khmer. gTTS uses Google TTS and supports Khmer.
+    fallback_path = output_path + ".gtts.mp3"
+    gTTS(text=text, lang="km", slow=False).save(fallback_path)
+
+    rate_value = {"+0%": 1.0, "+10%": 1.10, "+15%": 1.15, "+20%": 1.20, "+25%": 1.25}.get(rate, 1.0)
+    if rate_value == 1.0:
+        shutil.move(fallback_path, output_path)
+    else:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        subprocess.run(
+            [ffmpeg, "-y", "-i", fallback_path, "-filter:a", f"atempo={rate_value}", output_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        try:
+            os.remove(fallback_path)
+        except OSError:
+            pass
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) <= 1000:
+        raise RuntimeError("មិនអាចបង្កើតសំឡេងខ្មែរ TTS បានទេ។")
 
 
 def _audio_duration(path):
