@@ -4,7 +4,6 @@ import { pipeline } from "@huggingface/transformers";
 import "./style.css";
 
 let transcriber = null;
-let translator = null;
 
 async function getTranscriber(setStatus) {
   if (transcriber) return transcriber;
@@ -19,18 +18,49 @@ async function getTranscriber(setStatus) {
   return transcriber;
 }
 
-async function getTranslator(setStatus) {
-  if (translator) return translator;
+/* =========================
+   MyMemory Translation
+   ========================= */
 
-  setStatus("🌐 កំពុងទាញ Khmer Translation model...");
+async function translateText(text, sourceLang) {
+  if (!text?.trim()) return "";
 
-  translator = await pipeline(
-    "translation",
-    "Xenova/nllb-200-distilled-600M"
+  const source =
+    sourceLang === "zho_Hans"
+      ? "zh-CN"
+      : "en";
+
+  const params = new URLSearchParams({
+    q: text.trim(),
+    langpair: `${source}|km-KM`,
+    mt: "1",
+  });
+
+  const response = await fetch(
+    `https://api.mymemory.translated.net/get?${params.toString()}`
   );
 
-  return translator;
+  if (!response.ok) {
+    throw new Error(
+      `Translation API error ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+
+  const translated =
+    data?.responseData?.translatedText?.trim() || "";
+
+  if (!translated) {
+    throw new Error("មិនទទួលបាន Khmer Translation");
+  }
+
+  return translated;
 }
+
+/* =========================
+   Audio
+   ========================= */
 
 function resampleAudio(input, fromRate, toRate) {
   if (fromRate === toRate) return input;
@@ -41,8 +71,13 @@ function resampleAudio(input, fromRate, toRate) {
 
   for (let i = 0; i < newLength; i++) {
     const position = i * ratio;
+
     const left = Math.floor(position);
-    const right = Math.min(left + 1, input.length - 1);
+    const right = Math.min(
+      left + 1,
+      input.length - 1
+    );
+
     const weight = position - left;
 
     output[i] =
@@ -55,6 +90,7 @@ function resampleAudio(input, fromRate, toRate) {
 
 async function videoToAudio(videoFile) {
   const arrayBuffer = await videoFile.arrayBuffer();
+
   const audioContext = new AudioContext();
 
   const audioBuffer =
@@ -62,10 +98,12 @@ async function videoToAudio(videoFile) {
 
   const channels = audioBuffer.numberOfChannels;
   const length = audioBuffer.length;
+
   const mono = new Float32Array(length);
 
   for (let channel = 0; channel < channels; channel++) {
-    const data = audioBuffer.getChannelData(channel);
+    const data =
+      audioBuffer.getChannelData(channel);
 
     for (let i = 0; i < length; i++) {
       mono[i] += data[i] / channels;
@@ -83,31 +121,58 @@ async function videoToAudio(videoFile) {
   return audio16k;
 }
 
+/* =========================
+   Time
+   ========================= */
+
 function formatTime(seconds) {
-  if (seconds == null || Number.isNaN(seconds)) {
+  if (
+    seconds == null ||
+    Number.isNaN(seconds)
+  ) {
     return "00:00";
   }
 
-  const total = Math.max(0, Math.floor(seconds));
+  const total = Math.max(
+    0,
+    Math.floor(seconds)
+  );
+
   const minutes = Math.floor(total / 60);
   const secs = total % 60;
 
-  return `${String(minutes).padStart(2, "0")}:${String(
-    secs
-  ).padStart(2, "0")}`;
+  return `${String(minutes).padStart(
+    2,
+    "0"
+  )}:${String(secs).padStart(2, "0")}`;
 }
+
+/* =========================
+   App
+   ========================= */
 
 function App() {
   const [video, setVideo] = useState(null);
   const [videoUrl, setVideoUrl] = useState("");
-  const [status, setStatus] = useState("រង់ចាំវីដេអូ...");
+
+  const [status, setStatus] = useState(
+    "រង់ចាំវីដេអូ..."
+  );
+
   const [busy, setBusy] = useState(false);
 
   const [text, setText] = useState("");
-  const [translatedText, setTranslatedText] = useState("");
+  const [translatedText, setTranslatedText] =
+    useState("");
+
   const [caption, setCaption] = useState([]);
 
-  const [sourceLang, setSourceLang] = useState("eng_Latn");
+  const [sourceLang, setSourceLang] =
+    useState("eng_Latn");
+
+  /* =========================
+     Video URL
+     ========================= */
 
   useEffect(() => {
     if (!video) {
@@ -115,120 +180,197 @@ function App() {
       return;
     }
 
-    const url = URL.createObjectURL(video);
+    const url =
+      URL.createObjectURL(video);
+
     setVideoUrl(url);
 
-    return () => URL.revokeObjectURL(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
   }, [video]);
 
+  /* =========================
+     Select Video
+     ========================= */
+
   function handleVideo(event) {
-    const file = event.target.files?.[0];
+    const file =
+      event.target.files?.[0];
 
     if (!file) return;
 
     setVideo(file);
+
     setText("");
     setTranslatedText("");
     setCaption([]);
-    setStatus(`បានជ្រើស៖ ${file.name}`);
+
+    setStatus(
+      `បានជ្រើស៖ ${file.name}`
+    );
   }
+
+  /* =========================
+     Start
+     ========================= */
 
   async function start() {
     if (!video) {
-      setStatus("សូមបញ្ចូលវីដេអូជាមុនសិន។");
+      setStatus(
+        "សូមបញ្ចូលវីដេអូជាមុនសិន។"
+      );
+
       return;
     }
 
     setBusy(true);
+
     setText("");
     setTranslatedText("");
     setCaption([]);
 
     try {
-      setStatus("🎧 កំពុងអានសំឡេងពីវីដេអូ...");
+      /* =========================
+         Extract Audio
+         ========================= */
 
-      const audio = await videoToAudio(video);
+      setStatus(
+        "🎧 កំពុងអានសំឡេងពីវីដេអូ..."
+      );
+
+      const audio =
+        await videoToAudio(video);
 
       if (!(audio instanceof Float32Array)) {
-        throw new Error("Audio format មិនត្រឹមត្រូវ");
+        throw new Error(
+          "Audio format មិនត្រឹមត្រូវ"
+        );
       }
 
       if (audio.length === 0) {
-        throw new Error("មិនមានសំឡេងក្នុងវីដេអូ");
+        throw new Error(
+          "មិនមានសំឡេងក្នុងវីដេអូ"
+        );
       }
 
-      setStatus("🤖 កំពុងដំណើរការ Whisper Tiny...");
+      /* =========================
+         Whisper
+         ========================= */
 
-      const whisper = await getTranscriber(setStatus);
+      setStatus(
+        "🤖 កំពុងដំណើរការ Whisper Tiny..."
+      );
 
-      const result = await whisper(audio, {
-        return_timestamps: true,
-        chunk_length_s: 30,
-        stride_length_s: 5,
-      });
+      const whisper =
+        await getTranscriber(setStatus);
 
-      const whisperText = result.text?.trim() || "";
+      const result =
+        await whisper(audio, {
+          return_timestamps: true,
+          chunk_length_s: 30,
+          stride_length_s: 5,
+        });
 
-      const chunks = (result.chunks || [])
-        .map((item) => ({
-          start: item.timestamp?.[0] ?? 0,
-          end: item.timestamp?.[1] ?? 0,
-          text: item.text?.trim() || "",
-          khmer: "",
-        }))
-        .filter((item) => item.text);
+      const whisperText =
+        result.text?.trim() || "";
+
+      const chunks =
+        (result.chunks || [])
+          .map((item) => ({
+            start:
+              item.timestamp?.[0] ?? 0,
+
+            end:
+              item.timestamp?.[1] ?? 0,
+
+            text:
+              item.text?.trim() || "",
+
+            khmer: "",
+          }))
+          .filter(
+            (item) => item.text
+          );
 
       setText(whisperText);
       setCaption(chunks);
 
       if (!whisperText) {
-        setStatus("⚠️ Whisper មិនរកឃើញសំឡេងនិយាយទេ។");
+        setStatus(
+          "⚠️ Whisper មិនរកឃើញសំឡេងនិយាយទេ។"
+        );
+
         return;
       }
 
-      setStatus("🌐 កំពុងបកប្រែទៅខ្មែរ...");
+      /* =========================
+         Khmer Translation
+         ========================= */
 
-      const translate = await getTranslator(setStatus);
+      setStatus(
+        "🇰🇭 កំពុងបកប្រែទៅខ្មែរ..."
+      );
 
       const translatedParts = [];
 
-      for (let i = 0; i < chunks.length; i++) {
+      for (
+        let i = 0;
+        i < chunks.length;
+        i++
+      ) {
         setStatus(
-          `🌐 បកប្រែទៅខ្មែរ ${i + 1}/${chunks.length}...`
+          `🇰🇭 បកប្រែទៅខ្មែរ ${i + 1}/${chunks.length}...`
         );
 
-        const resultKhmer = await translate(chunks[i].text, {
-          src_lang: sourceLang,
-          tgt_lang: "khm_Khmr",
-        });
+        let khmer = "";
 
-        const khmer =
-          resultKhmer?.[0]?.translation_text?.trim() || "";
+        try {
+          khmer =
+            await translateText(
+              chunks[i].text,
+              sourceLang
+            );
+        } catch (translationError) {
+          console.error(
+            translationError
+          );
+
+          khmer =
+            "⚠️ បកប្រែមិនបាន";
+        }
 
         translatedParts.push(khmer);
 
         setCaption((old) =>
-          old.map((item, index) =>
-            index === i
-              ? { ...item, khmer }
-              : item
+          old.map(
+            (item, index) =>
+              index === i
+                ? {
+                    ...item,
+                    khmer,
+                  }
+                : item
           )
         );
       }
 
       setTranslatedText(
-        translatedParts.filter(Boolean).join(" ")
+        translatedParts
+          .filter(Boolean)
+          .join(" ")
       );
 
       setStatus(
-        `✅ Caption + Khmer Translation រួចរាល់ — ${chunks.length} ផ្នែក`
+        `✅ Whisper + Khmer Translation រួចរាល់ — ${chunks.length} ផ្នែក`
       );
     } catch (error) {
       console.error(error);
 
       setStatus(
         `❌ មានបញ្ហា៖ ${
-          error?.message || "Unknown error"
+          error?.message ||
+          "Unknown error"
         }`
       );
     } finally {
@@ -236,17 +378,28 @@ function App() {
     }
   }
 
+  /* =========================
+     UI
+     ========================= */
+
   return (
     <main className="app">
       <section className="card">
-        <h1>🇰🇭 Smey Auto Caption V2</h1>
+
+        <h1>
+          🇰🇭 Smey Auto Caption V2
+        </h1>
 
         <p className="subtitle">
           Browser AI • Whisper • Khmer Caption • Translation • Khmer Voice
         </p>
 
+        {/* Upload */}
+
         <label className="upload">
-          <span>🎥 បញ្ចូលវីដេអូ</span>
+          <span>
+            🎥 បញ្ចូលវីដេអូ
+          </span>
 
           <input
             type="file"
@@ -255,13 +408,22 @@ function App() {
           />
         </label>
 
+        {/* Selected File */}
+
         {video && (
           <>
             <div className="file">
-              <strong>📁 {video.name}</strong>
+              <strong>
+                📁 {video.name}
+              </strong>
 
               <small>
-                {(video.size / 1024 / 1024).toFixed(1)} MB
+                {(
+                  video.size /
+                  1024 /
+                  1024
+                ).toFixed(1)}{" "}
+                MB
               </small>
             </div>
 
@@ -282,6 +444,8 @@ function App() {
           </>
         )}
 
+        {/* Source Language */}
+
         <div
           style={{
             marginTop: "14px",
@@ -290,11 +454,17 @@ function App() {
             background: "#334155",
           }}
         >
-          <strong>🌐 ភាសាសំឡេងដើម</strong>
+          <strong>
+            🌐 ភាសាសំឡេងដើម
+          </strong>
 
           <select
             value={sourceLang}
-            onChange={(e) => setSourceLang(e.target.value)}
+            onChange={(e) =>
+              setSourceLang(
+                e.target.value
+              )
+            }
             disabled={busy}
             style={{
               width: "100%",
@@ -304,12 +474,17 @@ function App() {
               fontSize: "16px",
             }}
           >
-            <option value="eng_Latn">English</option>
+            <option value="eng_Latn">
+              English
+            </option>
+
             <option value="zho_Hans">
               Chinese 简体中文
             </option>
           </select>
         </div>
+
+        {/* Start */}
 
         <button
           className="start"
@@ -321,9 +496,13 @@ function App() {
             : "▶️ ចាប់ផ្ដើម"}
         </button>
 
+        {/* Status */}
+
         <div className="status">
           {status}
         </div>
+
+        {/* Whisper */}
 
         {text && (
           <div
@@ -335,13 +514,21 @@ function App() {
               lineHeight: "1.8",
             }}
           >
-            <strong>📝 Whisper Caption:</strong>
+            <strong>
+              📝 Whisper Caption:
+            </strong>
 
-            <div style={{ marginTop: "10px" }}>
+            <div
+              style={{
+                marginTop: "10px",
+              }}
+            >
               {text}
             </div>
           </div>
         )}
+
+        {/* Khmer Translation */}
 
         {translatedText && (
           <div
@@ -353,66 +540,117 @@ function App() {
               lineHeight: "1.8",
             }}
           >
-            <strong>🇰🇭 Khmer Translation:</strong>
+            <strong>
+              🇰🇭 Khmer Translation:
+            </strong>
 
-            <div style={{ marginTop: "10px" }}>
+            <div
+              style={{
+                marginTop: "10px",
+              }}
+            >
               {translatedText}
             </div>
           </div>
         )}
 
+        {/* Timeline */}
+
         {caption.length > 0 && (
-          <div style={{ marginTop: "16px" }}>
-            <h3>⏱️ Caption Timeline</h3>
+          <div
+            style={{
+              marginTop: "16px",
+            }}
+          >
+            <h3>
+              ⏱️ Caption Timeline
+            </h3>
 
-            {caption.map((item, index) => (
-              <div
-                key={index}
-                style={{
-                  marginBottom: "8px",
-                  padding: "10px 12px",
-                  borderRadius: "10px",
-                  background: "#334155",
-                }}
-              >
-                <small>
-                  {formatTime(item.start)} →{" "}
-                  {formatTime(item.end)}
-                </small>
+            {caption.map(
+              (item, index) => (
+                <div
+                  key={index}
+                  style={{
+                    marginBottom: "8px",
+                    padding:
+                      "10px 12px",
+                    borderRadius:
+                      "10px",
+                    background:
+                      "#334155",
+                  }}
+                >
+                  <small>
+                    {formatTime(
+                      item.start
+                    )}{" "}
+                    →{" "}
+                    {formatTime(
+                      item.end
+                    )}
+                  </small>
 
-                <div style={{ marginTop: "4px" }}>
-                  {item.text}
-                </div>
-
-                {item.khmer && (
                   <div
                     style={{
-                      marginTop: "6px",
-                      fontWeight: "700",
+                      marginTop: "4px",
                     }}
                   >
-                    🇰🇭 {item.khmer}
+                    {item.text}
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {item.khmer && (
+                    <div
+                      style={{
+                        marginTop: "6px",
+                        fontWeight: "700",
+                      }}
+                    >
+                      🇰🇭{" "}
+                      {item.khmer}
+                    </div>
+                  )}
+                </div>
+              )
+            )}
           </div>
         )}
 
+        {/* Features */}
+
         <div className="features">
-          <div>🎙️ Whisper Speech → Caption</div>
-          <div>🇰🇭 Khmer Caption</div>
-          <div>🌐 Translation</div>
-          <div>🗣️ Khmer Voice</div>
-          <div>🎬 Video Sync</div>
-          <div>📥 MP4 Export</div>
+          <div>
+            🎙️ Whisper Speech → Caption
+          </div>
+
+          <div>
+            🇰🇭 Khmer Caption
+          </div>
+
+          <div>
+            🌐 Translation
+          </div>
+
+          <div>
+            🗣️ Khmer Voice
+          </div>
+
+          <div>
+            🎬 Video Sync
+          </div>
+
+          <div>
+            📥 MP4 Export
+          </div>
         </div>
+
       </section>
     </main>
   );
 }
 
-createRoot(document.getElementById("root")).render(
+createRoot(
+  document.getElementById("root")
+).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
