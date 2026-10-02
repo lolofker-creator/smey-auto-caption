@@ -38,7 +38,7 @@ st.write("Local AI → Accurate Caption → Khmer Translation → Khmer Dubbing 
 # =========================================================
 
 ASR_MODEL = "large-v3-turbo"
-TRANSLATION_MODEL = "solavr/small100-ctranslate2-int8"
+TRANSLATION_MODEL = "osa911/nllb-200-distilled-600M-ct2-int8"
 
 LANGUAGE_CODES = {
     "🇰🇭 ខ្មែរ": {"whisper": "km", "translate": "km"},
@@ -50,12 +50,21 @@ LANGUAGE_CODES = {
 }
 
 TARGET_CODES = {
-    "🇰🇭 ខ្មែរ": "km",
-    "🇬🇧 English": "en",
-    "🇨🇳 中文": "zh",
-    "🇻🇳 Tiếng Việt": "vi",
-    "🇰🇷 한국어": "ko",
-    "🇯🇵 日本語": "ja",
+    "🇰🇭 ខ្មែរ": "khm_Khm",
+    "🇬🇧 English": "eng_Latn",
+    "🇨🇳 中文": "zho_Hans",
+    "🇻🇳 Tiếng Việt": "vie_Latn",
+    "🇰🇷 한국어": "kor_Hang",
+    "🇯🇵 日本語": "jpn_Jpan",
+}
+
+SOURCE_CODES = {
+    "km": "khm_Khm",
+    "en": "eng_Latn",
+    "zh": "zho_Hans",
+    "vi": "vie_Latn",
+    "ko": "kor_Hang",
+    "ja": "jpn_Jpan",
 }
 
 
@@ -73,7 +82,7 @@ def load_asr():
 
 @st.cache_resource(show_spinner=False)
 def load_translator():
-    # SMaLL-100 INT8 is a compact CPU translation model.
+    # NLLB-200 distilled 600M INT8: multilingual local translation, CPU-friendly.
     model_dir = snapshot_download(TRANSLATION_MODEL)
     tokenizer = spm.SentencePieceProcessor(
         model_file=os.path.join(model_dir, "sentencepiece.bpe.model")
@@ -81,7 +90,7 @@ def load_translator():
     translator = ctranslate2.Translator(
         model_dir,
         device="cpu",
-        compute_type="int8_float32",
+        compute_type="int8",
         inter_threads=1,
         intra_threads=4,
     )
@@ -167,26 +176,44 @@ def translate_local(groups, source_code, target_code):
     if not groups or source_code == target_code:
         return groups
 
+    src_lang = SOURCE_CODES.get(source_code)
+    if not src_lang:
+        raise RuntimeError(f"Unsupported source language: {source_code}")
+
     tokenizer, translator = load_translator()
     texts = [str(g["text"]).strip() for g in groups]
 
+    # NLLB-200 format: source language token + SentencePiece tokens + EOS.
     source_tokens = [
-        [f"__{target_code}__"] + tokenizer.encode(text, out_type=str) + ["</s>"]
+        [src_lang] + tokenizer.encode(text, out_type=str) + ["</s>"]
         for text in texts
     ]
 
     results = translator.translate_batch(
         source_tokens,
-        beam_size=3,
+        target_prefix=[[target_code] for _ in texts],
+        beam_size=4,
         max_decoding_length=128,
+        repetition_penalty=1.15,
+        no_repeat_ngram_size=3,
     )
 
     translated = []
     for result in results:
         tokens = list(result.hypotheses[0])
-        if tokens and tokens[0] == f"__{target_code}__":
+        if tokens and tokens[0] == target_code:
             tokens = tokens[1:]
-        translated.append(tokenizer.decode(tokens).strip())
+        text = tokenizer.decode(tokens).strip()
+
+        # Safety against obvious decoder loops. Keep the original ASR text
+        # rather than publishing a corrupted repeated translation.
+        words = text.split()
+        if len(words) >= 8:
+            unique_ratio = len(set(words)) / max(1, len(words))
+            if unique_ratio < 0.35:
+                text = ""
+
+        translated.append(text)
 
     return [
         {
@@ -211,13 +238,53 @@ async def _tts_one(text, output_path, voice, rate):
     await communicate.save(output_path)
 
 
+def _audio_duration(path):
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    proc = subprocess.run(
+        [ffmpeg, "-i", path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    import re
+    m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", proc.stderr)
+    if not m:
+        return 0.0
+    h, mm, ss = m.groups()
+    return int(h) * 3600 + int(mm) * 60 + float(ss)
+
+
+def _fit_audio_to_slot(input_path, output_path, slot_seconds):
+    duration = _audio_duration(input_path)
+    if duration <= 0 or slot_seconds <= 0 or duration <= slot_seconds * 1.01:
+        shutil.copyfile(input_path, output_path)
+        return
+
+    # Speed up only as much as needed so each dubbed line ends before the
+    # next caption window. This keeps dialogue aligned to the speaker timing.
+    factor = min(4.0, max(1.0, duration / max(0.05, slot_seconds)))
+    chain = []
+    remaining = factor
+    while remaining > 2.0:
+        chain.append("atempo=2.0")
+        remaining /= 2.0
+    chain.append(f"atempo={remaining:.4f}")
+
+    run_ffmpeg([
+        "-y", "-i", input_path,
+        "-filter:a", ",".join(chain),
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ])
+
+
 def make_khmer_dubbing(
     video_path,
     groups,
     output_audio,
     voice="km-KH-PisethNeural",
     rate="+15%",
-    original_volume=0.22,
+    original_volume=0.05,
 ):
     if not groups:
         raise RuntimeError("❌ មិនមាន Caption សម្រាប់ Dubbing ទេ។")
@@ -225,7 +292,6 @@ def make_khmer_dubbing(
     temp_dir = tempfile.mkdtemp(prefix="smey_khmer_dub_")
 
     try:
-        jobs = []
         clips = []
 
         for i, group in enumerate(groups):
@@ -233,17 +299,17 @@ def make_khmer_dubbing(
             if not text:
                 continue
 
-            clip = os.path.join(temp_dir, f"voice_{i:04d}.mp3")
-            clips.append((clip, float(group["start"])))
-            jobs.append(_tts_one(text, clip, voice, rate))
+            raw = os.path.join(temp_dir, f"raw_{i:04d}.mp3")
+            fitted = os.path.join(temp_dir, f"voice_{i:04d}.m4a")
+            start = float(group["start"])
+            end = float(group["end"])
+            slot = max(0.25, end - start)
 
-        async def run_all():
-            await asyncio.gather(*jobs)
-
-        asyncio.run(run_all())
+            asyncio.run(_tts_one(text, raw, voice, rate))
+            _fit_audio_to_slot(raw, fitted, slot)
+            clips.append((fitted, start))
 
         inputs = ["-i", video_path]
-
         for clip, _start in clips:
             inputs += ["-i", clip]
 
@@ -437,7 +503,7 @@ if khmer_dubbing:
 
 st.info(
     "🆓 Local AI Mode: Caption + Translation មិនប្រើ Gemini API។ "
-    "Whisper large-v3-turbo + Local Translator + Edge TTS ដំណើរការដោយមិនដក Gemini quota។"
+    "Whisper large-v3-turbo + NLLB-200 INT8 + Edge TTS ដំណើរការដោយមិនដក Gemini quota។"
 )
 
 
@@ -497,7 +563,7 @@ if video is not None:
                 # Determine source language for local translation.
                 if source_language == "Auto Detect":
                     source_code = detected_language
-                    if source_code not in {"zh", "en", "km", "vi", "ko", "ja"}:
+                    if source_code not in SOURCE_CODES:
                         raise RuntimeError(
                             f"❌ Auto Detect រកភាសា '{detected_language}' "
                             "ដែលមិនទាន់មានក្នុង Local Translator Map។"
