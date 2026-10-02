@@ -67,8 +67,6 @@ def load_asr():
         ASR_MODEL,
         device="cpu",
         compute_type="int8",
-        cpu_threads=4,
-        num_workers=1,
     )
 
 
@@ -83,8 +81,6 @@ def load_translator():
         model_dir,
         device="cpu",
         compute_type="int8",
-        inter_threads=1,
-        intra_threads=4,
     )
     return tokenizer, translator
 
