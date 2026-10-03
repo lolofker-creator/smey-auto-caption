@@ -122,6 +122,18 @@ def safe_text(text):
     )
 
 
+def safe_subtitle_path(path):
+    """
+    Make ASS path safe for FFmpeg subtitles filter.
+    """
+    return (
+        path
+        .replace("\\", "/")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+    )
+
+
 # =========================================================
 # LOAD WHISPER
 # =========================================================
@@ -172,7 +184,10 @@ def load_translator():
         for root, _, files in os.walk(model_path):
             for f in files:
                 if f.endswith(".model"):
-                    sp_model = os.path.join(root, f)
+                    sp_model = os.path.join(
+                        root,
+                        f,
+                    )
                     break
 
             if sp_model:
@@ -207,7 +222,10 @@ def load_translator():
 # TRANSCRIBE
 # =========================================================
 
-def transcribe_local(video_path, source_language):
+def transcribe_local(
+    video_path,
+    source_language,
+):
     model = load_asr()
 
     language = {
@@ -298,11 +316,16 @@ def translate_local(
     for result in results:
         tokens = result.hypotheses[0]
 
-        if tokens and tokens[0] == target_code:
+        if (
+            tokens
+            and tokens[0] == target_code
+        ):
             tokens = tokens[1:]
 
         try:
-            decoded = tokenizer.decode(tokens)
+            decoded = tokenizer.decode(
+                tokens
+            )
         except Exception:
             decoded = " ".join(tokens)
 
@@ -377,14 +400,16 @@ def fit_audio_to_slot(
 
     filters = []
 
-    # Pitch-preserving speed correction.
-    # Keep each atempo between 0.5 and 2.0.
     while ratio > 2.0:
-        filters.append("atempo=2.0")
+        filters.append(
+            "atempo=2.0"
+        )
         ratio /= 2.0
 
     while ratio < 0.5:
-        filters.append("atempo=0.5")
+        filters.append(
+            "atempo=0.5"
+        )
         ratio /= 0.5
 
     filters.append(
@@ -446,7 +471,12 @@ def make_khmer_dubbing(
 
         start = max(
             0.0,
-            float(chunk.get("start", 0)),
+            float(
+                chunk.get(
+                    "start",
+                    0,
+                )
+            ),
         )
 
         end = min(
@@ -486,6 +516,7 @@ def make_khmer_dubbing(
 
     valid = []
 
+    # Four TTS jobs at the same time.
     batch_size = 4
 
     for base in range(
@@ -545,7 +576,6 @@ def make_khmer_dubbing(
         with ThreadPoolExecutor(
             max_workers=4
         ) as executor:
-
             results = list(
                 executor.map(
                     process_one,
@@ -627,7 +657,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # =========================================================
 # FINAL VIDEO
-# ONE FFMPEG PASS
 # =========================================================
 
 def render_final_video(
@@ -657,14 +686,16 @@ def render_final_video(
 
     filter_parts = []
 
-    # Original audio.
+    # Original music/audio.
     filter_parts.append(
         "[0:a]"
         f"volume={original_volume:.3f}"
         "[orig]"
     )
 
-    mix_inputs = ["[orig]"]
+    mix_inputs = [
+        "[orig]"
+    ]
 
     for n, item in enumerate(
         voice_files,
@@ -705,9 +736,14 @@ def render_final_video(
         filter_parts
     )
 
+    # FIXED: safe ASS path.
+    safe_ass_path = safe_subtitle_path(
+        ass_path
+    )
+
     filter_complex += (
         f";[0:v]subtitles="
-        f"'{ass_path.replace(chr(39), r\"'\\''\")}'"
+        f"'{safe_ass_path}'"
         "[vout]"
     )
 
@@ -729,25 +765,36 @@ def render_final_video(
         [
             "-filter_complex",
             filter_complex,
+
             "-map",
             "[vout]",
+
             "-map",
             "[mix]",
+
             "-c:v",
             "libx264",
+
             "-preset",
             "ultrafast",
+
             "-crf",
             "28",
+
             "-pix_fmt",
             "yuv420p",
+
             "-c:a",
             "aac",
+
             "-b:a",
             "128k",
+
             "-movflags",
             "+faststart",
+
             "-shortest",
+
             "-y",
             output_video,
         ]
@@ -968,6 +1015,7 @@ def main():
 
         if source_language == "Khmer":
             khmer_texts = texts
+
         else:
             st.info(
                 "🌐 កំពុងបកប្រែជា Khmer..."
@@ -1038,23 +1086,39 @@ def main():
                 "🎬 កំពុងបង្កើត Caption MP4..."
             )
 
+            safe_ass_path = safe_subtitle_path(
+                ass_path
+            )
+
+            subtitle_filter = (
+                f"subtitles='{safe_ass_path}'"
+            )
+
             run_cmd(
                 [
                     FFMPEG,
+
                     "-i",
                     input_path,
+
                     "-vf",
-                    f"subtitles={ass_path}",
+                    subtitle_filter,
+
                     "-c:v",
                     "libx264",
+
                     "-preset",
                     "ultrafast",
+
                     "-crf",
                     "28",
+
                     "-c:a",
                     "copy",
+
                     "-movflags",
                     "+faststart",
+
                     "-y",
                     output_path,
                 ]
@@ -1093,7 +1157,10 @@ def main():
             "rb",
         ) as f:
             st.download_button(
-                label="⬇️ ទាញយក Khmer Dubbing MP4",
+                label=(
+                    "⬇️ ទាញយក "
+                    "Khmer Dubbing MP4"
+                ),
                 data=f,
                 file_name=(
                     "Smey_Khmer_Dubbing.mp4"
@@ -1109,6 +1176,10 @@ def main():
 
         st.exception(e)
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
