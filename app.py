@@ -1,9 +1,8 @@
 import os
-import subprocess
-import tempfile
-import asyncio
-import shutil
 import re
+import uuid
+import asyncio
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
@@ -16,141 +15,747 @@ from huggingface_hub import snapshot_download
 
 
 # =========================================================
-# APP
+# CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="Smey Auto Caption",
+    page_title="🇰🇭 Smey Auto Caption",
     page_icon="🇰🇭",
+    layout="wide",
 )
 
-st.title("🇰🇭 Smey Auto Caption")
-
-
-# =========================================================
-# MODELS
-# =========================================================
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 ASR_MODEL = "tiny"
-
-TRANSLATION_MODEL = (
-    "osa911/nllb-200-distilled-600M-ct2-int8"
-)
-
-
-# =========================================================
-# LANGUAGE MAP
-# =========================================================
-
-LANGUAGE_CODES = {
-    "🇰🇭 ខ្មែរ": {
-        "whisper": "km",
-        "translate": "km",
-    },
-    "🇬🇧 English": {
-        "whisper": "en",
-        "translate": "en",
-    },
-    "🇨🇳 中文": {
-        "whisper": "zh",
-        "translate": "zh",
-    },
-    "🇻🇳 Tiếng Việt": {
-        "whisper": "vi",
-        "translate": "vi",
-    },
-    "🇰🇷 한국어": {
-        "whisper": "ko",
-        "translate": "ko",
-    },
-    "🇯🇵 日本語": {
-        "whisper": "ja",
-        "translate": "ja",
-    },
-}
-
-
-TARGET_CODES = {
-    "🇰🇭 ខ្មែរ": "khm_Khm",
-    "🇬🇧 English": "eng_Latn",
-    "🇨🇳 中文": "zho_Hans",
-    "🇻🇳 Tiếng Việt": "vie_Latn",
-    "🇰🇷 한국어": "kor_Hang",
-    "🇯🇵 日本語": "jpn_Jpan",
-}
-
-
-SOURCE_CODES = {
-    "km": "khm_Khm",
-    "en": "eng_Latn",
-    "zh": "zho_Hans",
-    "vi": "vie_Latn",
-    "ko": "kor_Hang",
-    "ja": "jpn_Jpan",
-}
-
-
-# =========================================================
-# KHMER FEMALE VOICE
-# =========================================================
+TRANSLATOR_MODEL = "osa911/nllb-200-distilled-600M-ct2-int8"
 
 KHMER_VOICE = "km-KH-SreymomNeural"
+
+LANG_MAP = {
+    "Khmer": "khm_Khmr",
+    "English": "eng_Latn",
+    "Chinese": "zho_Hans",
+    "Vietnamese": "vie_Latn",
+    "Korean": "kor_Hang",
+    "Japanese": "jpn_Jpan",
+}
+
+LANG_CODE = {
+    "Khmer": "km",
+    "English": "en",
+    "Chinese": "zh",
+    "Vietnamese": "vi",
+    "Korean": "ko",
+    "Japanese": "ja",
+}
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def run_cmd(cmd):
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+
+def audio_duration(path):
+    result = subprocess.run(
+        [
+            FFMPEG,
+            "-i",
+            path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    text = result.stderr
+
+    m = re.search(
+        r"Duration:\s*(\d+):(\d+):([\d.]+)",
+        text,
+    )
+
+    if not m:
+        return 0.0
+
+    h = int(m.group(1))
+    mnt = int(m.group(2))
+    sec = float(m.group(3))
+
+    return h * 3600 + mnt * 60 + sec
+
+
+def format_ass_time(seconds):
+    seconds = max(0, float(seconds))
+
+    h = int(seconds // 3600)
+    seconds -= h * 3600
+
+    m = int(seconds // 60)
+    seconds -= m * 60
+
+    s = int(seconds)
+    cs = int(round((seconds - s) * 100))
+
+    if cs >= 100:
+        s += 1
+        cs = 0
+
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def safe_text(text):
+    return (
+        str(text)
+        .replace("\\", " ")
+        .replace("{", "")
+        .replace("}", "")
+        .replace("\n", " ")
+        .strip()
+    )
 
 
 # =========================================================
 # LOAD WHISPER
 # =========================================================
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def load_asr():
+    cpu_threads = max(
+        1,
+        min(4, os.cpu_count() or 1),
+    )
+
     return WhisperModel(
         ASR_MODEL,
         device="cpu",
         compute_type="int8",
+        cpu_threads=cpu_threads,
+        num_workers=1,
     )
 
 
 # =========================================================
-# LOAD TRANSLATOR
+# LOAD NLLB
 # =========================================================
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def load_translator():
-
-    model_dir = snapshot_download(
-        TRANSLATION_MODEL
+    model_path = snapshot_download(
+        repo_id=TRANSLATOR_MODEL
     )
+
+    sp_model = None
+
+    for name in [
+        "sentencepiece.bpe.model",
+        "source.spm",
+        "spm.model",
+    ]:
+        candidate = os.path.join(
+            model_path,
+            name,
+        )
+
+        if os.path.exists(candidate):
+            sp_model = candidate
+            break
+
+    if sp_model is None:
+        for root, _, files in os.walk(model_path):
+            for f in files:
+                if f.endswith(".model"):
+                    sp_model = os.path.join(root, f)
+                    break
+
+            if sp_model:
+                break
+
+    if sp_model is None:
+        raise RuntimeError(
+            "SentencePiece model not found."
+        )
 
     tokenizer = spm.SentencePieceProcessor(
-        model_file=os.path.join(
-            model_dir,
-            "sentencepiece.bpe.model",
-        )
+        model_file=sp_model
+    )
+
+    intra_threads = max(
+        1,
+        min(4, os.cpu_count() or 1),
     )
 
     translator = ctranslate2.Translator(
-        model_dir,
+        model_path,
         device="cpu",
         compute_type="int8",
+        inter_threads=1,
+        intra_threads=intra_threads,
     )
 
-    return tokenizer, translator
+    return translator, tokenizer
 
 
 # =========================================================
-# FFMPEG
+# TRANSCRIBE
 # =========================================================
 
-def run_ffmpeg(args):
+def transcribe_local(video_path, source_language):
+    model = load_asr()
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    language = {
+        "English": "en",
+        "Chinese": "zh",
+        "Khmer": "km",
+        "Vietnamese": "vi",
+        "Korean": "ko",
+        "Japanese": "ja",
+    }.get(source_language)
 
-    subprocess.run(
-        [ffmpeg] + args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
+    segments, info = model.transcribe(
+        video_path,
+        language=language,
+        beam_size=1,
+        best_of=1,
+        temperature=0,
+        vad_filter=True,
+        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        word_timestamps=False,
     )
+
+    results = []
+
+    for seg in segments:
+        text = (seg.text or "").strip()
+
+        if not text:
+            continue
+
+        results.append(
+            {
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "text": text,
+            }
+        )
+
+    return results
+
+
+# =========================================================
+# TRANSLATE
+# =========================================================
+
+def translate_local(
+    texts,
+    source_language,
+    target_language="Khmer",
+):
+    if not texts:
+        return []
+
+    if source_language == target_language:
+        return list(texts)
+
+    translator, tokenizer = load_translator()
+
+    source_code = LANG_MAP[source_language]
+    target_code = LANG_MAP[target_language]
+
+    source_tokens = []
+
+    for text in texts:
+        pieces = tokenizer.encode(
+            text,
+            out_type=str,
+        )
+
+        source_tokens.append(pieces)
+
+    results = translator.translate_batch(
+        source_tokens,
+        target_prefix=[
+            [target_code]
+            for _ in texts
+        ],
+        beam_size=1,
+        max_decoding_length=64,
+        repetition_penalty=1.05,
+    )
+
+    output = []
+
+    for result in results:
+        tokens = result.hypotheses[0]
+
+        if tokens and tokens[0] == target_code:
+            tokens = tokens[1:]
+
+        try:
+            decoded = tokenizer.decode(tokens)
+        except Exception:
+            decoded = " ".join(tokens)
+
+        output.append(
+            decoded.strip()
+        )
+
+    return output
+
+
+# =========================================================
+# TTS
+# =========================================================
+
+async def _tts_async(
+    text,
+    output_path,
+    rate="+0%",
+):
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=KHMER_VOICE,
+        rate=rate,
+        volume="+0%",
+        pitch="+0Hz",
+    )
+
+    await communicate.save(
+        output_path
+    )
+
+
+def tts_one(
+    text,
+    output_path,
+    rate="+0%",
+):
+    asyncio.run(
+        _tts_async(
+            text,
+            output_path,
+            rate,
+        )
+    )
+
+
+# =========================================================
+# FIT AUDIO TO SLOT
+# =========================================================
+
+def fit_audio_to_slot(
+    input_path,
+    output_path,
+    target_duration,
+):
+    source_duration = audio_duration(
+        input_path
+    )
+
+    if source_duration <= 0:
+        return False
+
+    target_duration = max(
+        0.25,
+        float(target_duration),
+    )
+
+    ratio = (
+        source_duration /
+        target_duration
+    )
+
+    filters = []
+
+    # Pitch-preserving speed correction.
+    # Keep each atempo between 0.5 and 2.0.
+    while ratio > 2.0:
+        filters.append("atempo=2.0")
+        ratio /= 2.0
+
+    while ratio < 0.5:
+        filters.append("atempo=0.5")
+        ratio /= 0.5
+
+    filters.append(
+        f"atempo={ratio:.6f}"
+    )
+
+    filters.extend(
+        [
+            "afade=t=in:st=0:d=0.015",
+            (
+                "afade=t=out:"
+                f"st={max(0.02, target_duration - 0.02):.3f}:"
+                "d=0.015"
+            ),
+        ]
+    )
+
+    run_cmd(
+        [
+            FFMPEG,
+            "-i",
+            input_path,
+            "-filter:a",
+            ",".join(filters),
+            "-ar",
+            "22050",
+            "-ac",
+            "1",
+            "-y",
+            output_path,
+        ]
+    )
+
+    return True
+
+
+# =========================================================
+# MAKE DUBBING AUDIO
+# =========================================================
+
+def make_khmer_dubbing(
+    chunks,
+    duration,
+    temp_dir,
+    rate="+0%",
+):
+    jobs = []
+
+    for i, chunk in enumerate(chunks):
+        text = (
+            chunk.get("khmer") or ""
+        ).strip()
+
+        if not text:
+            continue
+
+        if text.startswith("⚠️"):
+            continue
+
+        start = max(
+            0.0,
+            float(chunk.get("start", 0)),
+        )
+
+        end = min(
+            duration,
+            float(
+                chunk.get(
+                    "end",
+                    start + 1,
+                )
+            ),
+        )
+
+        end = max(
+            start + 0.25,
+            end,
+        )
+
+        if start >= duration:
+            continue
+
+        if end <= start:
+            continue
+
+        jobs.append(
+            {
+                "index": i,
+                "text": text,
+                "start": start,
+                "end": end,
+            }
+        )
+
+    if not jobs:
+        raise RuntimeError(
+            "No Khmer speech segments found."
+        )
+
+    valid = []
+
+    batch_size = 4
+
+    for base in range(
+        0,
+        len(jobs),
+        batch_size,
+    ):
+        batch = jobs[
+            base:base + batch_size
+        ]
+
+        st.session_state[
+            "progress_status"
+        ] = (
+            f"🗣️ Khmer Voice "
+            f"{min(base + len(batch), len(jobs))}"
+            f"/{len(jobs)}..."
+        )
+
+        def process_one(job):
+            i = job["index"]
+            text = job["text"]
+            start = job["start"]
+            end = job["end"]
+
+            raw = os.path.join(
+                temp_dir,
+                f"voice_raw_{i}.mp3",
+            )
+
+            fitted = os.path.join(
+                temp_dir,
+                f"voice_fit_{i}.wav",
+            )
+
+            tts_one(
+                text,
+                raw,
+                rate=rate,
+            )
+
+            ok = fit_audio_to_slot(
+                raw,
+                fitted,
+                end - start,
+            )
+
+            if not ok:
+                return None
+
+            return {
+                "file": fitted,
+                "start": start,
+                "end": end,
+            }
+
+        with ThreadPoolExecutor(
+            max_workers=4
+        ) as executor:
+
+            results = list(
+                executor.map(
+                    process_one,
+                    batch,
+                )
+            )
+
+        for item in results:
+            if item:
+                valid.append(item)
+
+    if not valid:
+        raise RuntimeError(
+            "Khmer TTS failed."
+        )
+
+    return valid
+
+
+# =========================================================
+# CREATE ASS
+# =========================================================
+
+def make_ass(
+    chunks,
+    ass_path,
+):
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Khmer,Noto Sans Khmer,54,&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,0,0,1,3,1,2,50,50,55,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    lines = [header]
+
+    for chunk in chunks:
+        text = (
+            chunk.get("khmer")
+            or chunk.get("text")
+            or ""
+        )
+
+        text = safe_text(text)
+
+        if not text:
+            continue
+
+        start = format_ass_time(
+            chunk.get("start", 0)
+        )
+
+        end = format_ass_time(
+            chunk.get("end", 0)
+        )
+
+        lines.append(
+            "Dialogue: 0,"
+            f"{start},{end},Khmer,,0,0,0,,"
+            f"{text}\n"
+        )
+
+    with open(
+        ass_path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write(
+            "".join(lines)
+        )
+
+
+# =========================================================
+# FINAL VIDEO
+# ONE FFMPEG PASS
+# =========================================================
+
+def render_final_video(
+    input_video,
+    output_video,
+    voice_files,
+    ass_path,
+    original_volume=0.05,
+):
+    if not voice_files:
+        raise RuntimeError(
+            "No voice files."
+        )
+
+    inputs = [
+        "-i",
+        input_video,
+    ]
+
+    for item in voice_files:
+        inputs.extend(
+            [
+                "-i",
+                item["file"],
+            ]
+        )
+
+    filter_parts = []
+
+    # Original audio.
+    filter_parts.append(
+        "[0:a]"
+        f"volume={original_volume:.3f}"
+        "[orig]"
+    )
+
+    mix_inputs = ["[orig]"]
+
+    for n, item in enumerate(
+        voice_files,
+        start=1,
+    ):
+        delay_ms = max(
+            0,
+            int(
+                round(
+                    item["start"] * 1000
+                )
+            ),
+        )
+
+        label = f"v{n}"
+
+        filter_parts.append(
+            f"[{n}:a]"
+            f"adelay={delay_ms}|{delay_ms},"
+            "volume=1.0"
+            f"[{label}]"
+        )
+
+        mix_inputs.append(
+            f"[{label}]"
+        )
+
+    filter_parts.append(
+        "".join(mix_inputs)
+        + f"amix=inputs={len(mix_inputs)}:"
+        "duration=first:"
+        "dropout_transition=0:"
+        "normalize=0"
+        "[mix]"
+    )
+
+    filter_complex = ";".join(
+        filter_parts
+    )
+
+    filter_complex += (
+        f";[0:v]subtitles="
+        f"'{ass_path.replace(chr(39), r\"'\\''\")}'"
+        "[vout]"
+    )
+
+    cmd = [
+        FFMPEG,
+        "-i",
+        input_video,
+    ]
+
+    for item in voice_files:
+        cmd.extend(
+            [
+                "-i",
+                item["file"],
+            ]
+        )
+
+    cmd.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "[mix]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            "-y",
+            output_video,
+        ]
+    )
+
+    run_cmd(cmd)
+
+    return output_video
 
 
 # =========================================================
@@ -161,10 +766,9 @@ def extract_audio(
     video_path,
     audio_path,
 ):
-
-    run_ffmpeg(
+    run_cmd(
         [
-            "-y",
+            FFMPEG,
             "-i",
             video_path,
             "-vn",
@@ -172,1149 +776,339 @@ def extract_audio(
             "1",
             "-ar",
             "16000",
-            "-c:a",
+            "-acodec",
             "pcm_s16le",
+            "-y",
             audio_path,
         ]
     )
 
 
 # =========================================================
-# WHISPER
+# MAIN APP
 # =========================================================
 
-def transcribe_local(
-    audio_path,
-    source_language,
-):
-
-    model = load_asr()
-
-    whisper_language = None
-
-    if source_language != "Auto Detect":
-
-        whisper_language = LANGUAGE_CODES[
-            source_language
-        ]["whisper"]
-
-    segments, info = model.transcribe(
-        audio_path,
-        language=whisper_language,
-        task="transcribe",
-        beam_size=1,
-        best_of=1,
-        temperature=0,
-        vad_filter=True,
-        vad_parameters={
-            "min_silence_duration_ms": 350
-        },
-        condition_on_previous_text=False,
-        initial_prompt=(
-            "Chinese dialogue from a short drama. "
-            "Transcribe the spoken words exactly; "
-            "do not translate."
-            if source_language == "🇨🇳 中文"
-            else None
-        ),
+def main():
+    st.title(
+        "🇰🇭 Smey Auto Caption"
     )
 
-    groups = []
-
-    for segment in segments:
-
-        text = str(
-            segment.text
-        ).strip()
-
-        if not text:
-            continue
-
-        start = max(
-            0.0,
-            float(segment.start),
-        )
-
-        end = max(
-            start + 0.2,
-            float(segment.end),
-        )
-
-        groups.append(
-            {
-                "start": start,
-                "end": end,
-                "text": text,
-            }
-        )
-
-    return groups, getattr(
-        info,
-        "language",
-        None,
+    st.caption(
+        "Video → Speech → Khmer → "
+        "Sreymom Voice → Sync → MP4"
     )
 
-
-# =========================================================
-# TRANSLATION
-# =========================================================
-
-def translate_local(
-    groups,
-    source_code,
-    target_code,
-):
-
-    if (
-        not groups
-        or source_code == target_code
-    ):
-        return groups
-
-    src_lang = SOURCE_CODES.get(
-        source_code
-    )
-
-    if not src_lang:
-
-        raise RuntimeError(
-            f"Unsupported source language: "
-            f"{source_code}"
-        )
-
-    tokenizer, translator = (
-        load_translator()
-    )
-
-    texts = [
-        str(g["text"]).strip()
-        for g in groups
-    ]
-
-    source_tokens = [
-
-        [src_lang]
-        + tokenizer.encode(
-            text,
-            out_type=str,
-        )
-        + ["</s>"]
-
-        for text in texts
-    ]
-
-    results = translator.translate_batch(
-
-        source_tokens,
-
-        target_prefix=[
-            [target_code]
-            for _ in texts
+    uploaded = st.file_uploader(
+        "🎬 បញ្ចូលវីដេអូ",
+        type=[
+            "mp4",
+            "mov",
+            "mkv",
+            "webm",
+            "avi",
         ],
-
-        beam_size=2,
-
-        max_decoding_length=96,
-
-        repetition_penalty=1.15,
-
-        no_repeat_ngram_size=3,
     )
 
-    translated = []
+    col1, col2 = st.columns(2)
 
-    for result in results:
-
-        tokens = list(
-            result.hypotheses[0]
+    with col1:
+        source_language = st.selectbox(
+            "🌍 ភាសាវីដេអូ",
+            [
+                "English",
+                "Chinese",
+                "Khmer",
+                "Vietnamese",
+                "Korean",
+                "Japanese",
+            ],
         )
 
-        if (
-            tokens
-            and tokens[0] == target_code
-        ):
-            tokens = tokens[1:]
-
-        text = tokenizer.decode(
-            tokens
-        ).strip()
-
-        words = text.split()
-
-        if len(words) >= 8:
-
-            unique_ratio = (
-                len(set(words))
-                / max(
-                    1,
-                    len(words),
-                )
-            )
-
-            if unique_ratio < 0.35:
-                text = ""
-
-        translated.append(text)
-
-    return [
-
-        {
-            "start": group["start"],
-            "end": group["end"],
-            "text": (
-                translated_text
-                or group["text"]
-            ),
-        }
-
-        for group, translated_text
-        in zip(groups, translated)
-
-    ]
-
-
-# =========================================================
-# EDGE TTS
-# =========================================================
-
-async def _tts_one(
-    text,
-    output_path,
-    voice,
-    rate,
-):
-
-    try:
-
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice,
-            rate=rate,
-            volume="+0%",
-            pitch="+0Hz",
+    with col2:
+        target_language = st.selectbox(
+            "🇰🇭 ភាសាបកប្រែ",
+            ["Khmer"],
         )
 
-        await communicate.save(
-            output_path
-        )
-
-    except Exception as e:
-
-        raise RuntimeError(
-            "មិនអាចបង្កើតសំឡេង "
-            f"Sreymom TTS: {e}"
-        )
-
-    if (
-        not os.path.exists(output_path)
-        or os.path.getsize(output_path)
-        <= 1000
-    ):
-
-        raise RuntimeError(
-            "មិនអាចបង្កើតសំឡេងខ្មែរ TTS បានទេ។"
-        )
-
-
-# =========================================================
-# AUDIO DURATION
-# =========================================================
-
-def _audio_duration(path):
-
-    ffmpeg = (
-        imageio_ffmpeg
-        .get_ffmpeg_exe()
+    khmer_dubbing = st.checkbox(
+        "🗣️ Khmer Dubbing",
+        value=True,
     )
 
-    proc = subprocess.run(
-
-        [
-            ffmpeg,
-            "-i",
-            path,
-        ],
-
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-
-        text=True,
+    voice_speed = st.slider(
+        "🎙️ Voice Speed",
+        min_value=-20,
+        max_value=20,
+        value=0,
+        step=5,
+        help="0% = ល្បឿនធម្មតា",
     )
 
-    m = re.search(
-        r"Duration: (\d+):(\d+):(\d+\.\d+)",
-        proc.stderr,
+    original_volume = st.slider(
+        "🎵 Original Audio / Music",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.05,
+        step=0.05,
     )
 
-    if not m:
-        return 0.0
+    if "progress_status" not in st.session_state:
+        st.session_state[
+            "progress_status"
+        ] = ""
 
-    h, mm, ss = m.groups()
+    if uploaded:
+        st.video(uploaded)
 
-    return (
-        int(h) * 3600
-        + int(mm) * 60
-        + float(ss)
-    )
-
-
-# =========================================================
-# FIT AUDIO TO CAPTION SLOT
-# =========================================================
-
-def _fit_audio_to_slot(
-    input_path,
-    output_path,
-    slot_seconds,
-):
-
-    duration = _audio_duration(
-        input_path
-    )
-
-    if (
-        duration <= 0
-        or slot_seconds <= 0
-        or duration <= slot_seconds * 1.01
-    ):
-
-        shutil.copyfile(
-            input_path,
-            output_path,
-        )
-
+    if not uploaded:
         return
 
-    factor = min(
-        4.0,
-        max(
-            1.0,
-            duration
-            / max(
-                0.05,
-                slot_seconds,
-            ),
-        ),
-    )
-
-    chain = []
-
-    remaining = factor
-
-    while remaining > 2.0:
-
-        chain.append(
-            "atempo=2.0"
-        )
-
-        remaining /= 2.0
-
-    chain.append(
-        f"atempo={remaining:.4f}"
-    )
-
-    run_ffmpeg(
-
-        [
-            "-y",
-            "-i",
-            input_path,
-            "-filter:a",
-            ",".join(chain),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            output_path,
-        ]
-    )
-
-
-# =========================================================
-# KHMER DUBBING
-# =========================================================
-
-def make_khmer_dubbing(
-    video_path,
-    groups,
-    output_audio,
-    voice=KHMER_VOICE,
-    rate="+0%",
-    original_volume=0.05,
-):
-
-    if not groups:
-
-        raise RuntimeError(
-            "❌ មិនមាន Caption សម្រាប់ Dubbing ទេ។"
-        )
-
-    temp_dir = tempfile.mkdtemp(
-        prefix="smey_khmer_dub_"
-    )
-
-    try:
-
-        jobs = []
-
-        for i, group in enumerate(groups):
-
-            text = str(
-                group.get(
-                    "text",
-                    "",
-                )
-            ).strip()
-
-            if not text:
-                continue
-
-            raw = os.path.join(
-                temp_dir,
-                f"raw_{i:04d}.mp3",
-            )
-
-            fitted = os.path.join(
-                temp_dir,
-                f"voice_{i:04d}.m4a",
-            )
-
-            start = float(
-                group["start"]
-            )
-
-            end = float(
-                group["end"]
-            )
-
-            slot = max(
-                0.25,
-                end - start,
-            )
-
-            jobs.append(
-                (
-                    text,
-                    raw,
-                    fitted,
-                    start,
-                    slot,
-                )
-            )
-
-        # =============================================
-        # PARALLEL TTS
-        # =============================================
-
-        def make_one(job):
-
-            (
-                text,
-                raw,
-                fitted,
-                start,
-                slot,
-            ) = job
-
-            asyncio.run(
-                _tts_one(
-                    text,
-                    raw,
-                    voice,
-                    rate,
-                )
-            )
-
-            _fit_audio_to_slot(
-                raw,
-                fitted,
-                slot,
-            )
-
-            return fitted, start
-
-        worker_count = min(
-            4,
-            max(
-                1,
-                len(jobs),
-            ),
-        )
-
-        with ThreadPoolExecutor(
-            max_workers=worker_count
-        ) as pool:
-
-            clips = list(
-                pool.map(
-                    make_one,
-                    jobs,
-                )
-            )
-
-        # =============================================
-        # BUILD AUDIO MIX
-        # =============================================
-
-        inputs = [
-            "-i",
-            video_path,
-        ]
-
-        for clip, _start in clips:
-
-            inputs += [
-                "-i",
-                clip,
-            ]
-
-        filters = [
-            f"[0:a]volume={original_volume}[orig]"
-        ]
-
-        mix = ["[orig]"]
-
-        for i, (
-            _clip,
-            start,
-        ) in enumerate(
-            clips,
-            start=1,
-        ):
-
-            delay = max(
-                0,
-                int(start * 1000),
-            )
-
-            label = f"[v{i}]"
-
-            filters.append(
-                f"[{i}:a]"
-                f"adelay={delay}|{delay}"
-                f"{label}"
-            )
-
-            mix.append(label)
-
-        filters.append(
-
-            "".join(mix)
-
-            + (
-                f"amix="
-                f"inputs={len(mix)}:"
-                "duration=first:"
-                "dropout_transition=0:"
-                "normalize=0[aout]"
-            )
-        )
-
-        run_ffmpeg(
-
-            inputs
-            + [
-                "-filter_complex",
-                ";".join(filters),
-
-                "-map",
-                "[aout]",
-
-                "-c:a",
-                "aac",
-
-                "-b:a",
-                "160k",
-
-                "-y",
-                output_audio,
-            ]
-        )
-
-    finally:
-
-        shutil.rmtree(
-            temp_dir,
-            ignore_errors=True,
-        )
-
-
-# =========================================================
-# ASS TIME
-# =========================================================
-
-def ass_time(seconds):
-
-    seconds = max(
-        0.0,
-        float(seconds),
-    )
-
-    h = int(
-        seconds // 3600
-    )
-
-    m = int(
-        (seconds % 3600)
-        // 60
-    )
-
-    s = int(
-        seconds % 60
-    )
-
-    cs = int(
-        round(
-            (
-                seconds
-                - int(seconds)
-            )
-            * 100
-        )
-    )
-
-    if cs >= 100:
-
-        cs = 0
-        s += 1
-
-    if s >= 60:
-
-        s = 0
-        m += 1
-
-    if m >= 60:
-
-        m = 0
-        h += 1
-
-    return (
-        f"{h}:"
-        f"{m:02d}:"
-        f"{s:02d}."
-        f"{cs:02d}"
-    )
-
-
-# =========================================================
-# CREATE ASS
-# =========================================================
-
-def create_ass(
-    groups,
-    filename,
-):
-
-    header = """[Script Info]
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Khmer,Noto Sans Khmer,70,&H00CC66FF,&H00FFFFFF,&H00FFFFFF,&H99000000,1,0,0,0,100,100,0,0,3,3,1,2,50,50,150,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-
-    with open(
-        filename,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        f.write(header)
-
-        for group in groups:
-
-            text = str(
-                group["text"]
-            ).replace(
-                "\n",
-                " ",
-            )
-
-            text = text.replace(
-                "{",
-                r"\{",
-            ).replace(
-                "}",
-                r"\}",
-            )
-
-            f.write(
-
-                "Dialogue: 0,"
-                f"{ass_time(group['start'])},"
-                f"{ass_time(group['end'])},"
-                "Khmer,,0,0,0,,"
-                f"{text}\n"
-            )
-
-
-# =========================================================
-# BURN CAPTION
-# =========================================================
-
-def burn_caption(
-    video_path,
-    ass_path,
-    output_path,
-):
-
-    escaped_ass = (
-        ass_path
-        .replace(
-            "\\",
-            "/",
-        )
-        .replace(
-            ":",
-            r"\:",
-        )
-        .replace(
-            "'",
-            r"\'",
-        )
-    )
-
-    run_ffmpeg(
-
-        [
-            "-y",
-
-            "-i",
-            video_path,
-
-            "-vf",
-            f"ass='{escaped_ass}'",
-
-            "-c:v",
-            "libx264",
-
-            "-crf",
-            "23",
-
-            "-preset",
-            "ultrafast",
-
-            "-c:a",
-            "aac",
-
-            "-b:a",
-            "160k",
-
-            "-movflags",
-            "+faststart",
-
-            output_path,
-        ]
-    )
-
-
-# =========================================================
-# UI
-# =========================================================
-
-source_language = st.selectbox(
-
-    "🌐 ភាសាវីដេអូ",
-
-    [
-        "Auto Detect",
-        "🇰🇭 ខ្មែរ",
-        "🇬🇧 English",
-        "🇨🇳 中文",
-        "🇻🇳 Tiếng Việt",
-        "🇰🇷 한국어",
-        "🇯🇵 日本語",
-    ],
-)
-
-
-target_language = st.selectbox(
-
-    "🎯 បកប្រែទៅ",
-
-    [
-        "មិនបកប្រែ",
-        "🇰🇭 ខ្មែរ",
-        "🇬🇧 English",
-        "🇨🇳 中文",
-        "🇻🇳 Tiếng Việt",
-        "🇰🇷 한국어",
-        "🇯🇵 日本語",
-    ],
-)
-
-
-st.divider()
-
-st.subheader(
-    "🗣️ និយាយខ្មែរ"
-)
-
-
-khmer_dubbing = st.checkbox(
-
-    "បើកសំឡេងខ្មែរ + រក្សាសំឡេងដើម",
-
-    value=False,
-)
-
-
-# SREYMOM VOICE
-khmer_voice = "km-KH-SreymomNeural"
-
-
-khmer_rate = st.select_slider(
-
-    "⚡ ល្បឿនសំឡេង",
-
-    options=[
-        "+0%",
-        "+10%",
-        "+15%",
-        "+20%",
-        "+25%",
-    ],
-
-    value="+0%",
-
-    disabled=not khmer_dubbing,
-)
-
-
-# Keep original music/audio low
-original_audio_volume = 0.05
-
-
-# =========================================================
-# VIDEO UPLOAD
-# =========================================================
-
-video = st.file_uploader(
-
-    "🎥 បញ្ចូលវីដេអូ",
-
-    type=[
-        "mp4",
-        "mov",
-        "mkv",
-        "webm",
-    ],
-)
-
-
-# =========================================================
-# START
-# =========================================================
-
-if video is not None:
-
-    caption_clicked = st.button(
+    start_button = st.button(
         "▶️ ចាប់ផ្ដើម",
+        type="primary",
         use_container_width=True,
     )
 
-    if caption_clicked:
+    if not start_button:
+        return
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+    work_id = uuid.uuid4().hex
 
-            video_path = os.path.join(
-                temp_dir,
-                "input.mp4",
-            )
-
-            audio_path = os.path.join(
-                temp_dir,
-                "audio.wav",
-            )
-
-            ass_path = os.path.join(
-                temp_dir,
-                "khmer_caption.ass",
-            )
-
-            output_path = os.path.join(
-                temp_dir,
-                "smey_auto_caption.mp4",
-            )
-
-            with open(
-                video_path,
-                "wb",
-            ) as f:
-
-                f.write(
-                    video.getbuffer()
-                )
-
-            try:
-
-                # =====================================
-                # EXTRACT AUDIO
-                # =====================================
-
-                with st.spinner(
-                    "⚡ កំពុងដកសំឡេង..."
-                ):
-
-                    extract_audio(
-                        video_path,
-                        audio_path,
-                    )
-
-
-                # =====================================
-                # WHISPER
-                # =====================================
-
-                with st.spinner(
-                    "🎙️ Local Whisper កំពុងស្តាប់សំឡេង..."
-                ):
-
-                    (
-                        groups,
-                        detected_language,
-                    ) = transcribe_local(
-                        audio_path,
-                        source_language,
-                    )
-
-
-                if not groups:
-
-                    raise RuntimeError(
-                        "❌ Local Whisper មិនបានរកឃើញ Caption ទេ។"
-                    )
-
-
-                # =====================================
-                # SOURCE LANGUAGE
-                # =====================================
-
-                if source_language == "Auto Detect":
-
-                    source_code = (
-                        detected_language
-                    )
-
-                    if (
-                        source_code
-                        not in SOURCE_CODES
-                    ):
-
-                        raise RuntimeError(
-
-                            "❌ Auto Detect រកភាសា "
-                            f"'{detected_language}' "
-                            "ដែលមិនទាន់មានក្នុង "
-                            "Local Translator Map។"
-                        )
-
-                else:
-
-                    source_code = (
-                        LANGUAGE_CODES[
-                            source_language
-                        ]["translate"]
-                    )
-
-
-                # =====================================
-                # TRANSLATION
-                # =====================================
-
-                if (
-                    target_language
-                    != "មិនបកប្រែ"
-                ):
-
-                    with st.spinner(
-                        "🌐 Local Translator កំពុងបកប្រែ..."
-                    ):
-
-                        groups = translate_local(
-
-                            groups,
-
-                            source_code,
-
-                            TARGET_CODES[
-                                target_language
-                            ],
-                        )
-
-
-                # =====================================
-                # KHMER DUBBING
-                # =====================================
-
-                if khmer_dubbing:
-
-                    if (
-                        target_language
-                        != "🇰🇭 ខ្មែរ"
-                    ):
-
-                        raise RuntimeError(
-
-                            "⚠️ Khmer Dubbing "
-                            "ត្រូវជ្រើស "
-                            "🎯 បកប្រែទៅជា "
-                            "→ 🇰🇭 ខ្មែរ។"
-                        )
-
-
-                    dubbed_audio_path = os.path.join(
-                        temp_dir,
-                        "khmer_dubbed_audio.m4a",
-                    )
-
-                    dubbed_video_path = os.path.join(
-                        temp_dir,
-                        "video_with_khmer_voice.mp4",
-                    )
-
-
-                    with st.spinner(
-
-                        "🗣️ Sreymom Voice "
-                        "+ Sync តាម Caption..."
-                    ):
-
-                        make_khmer_dubbing(
-
-                            video_path,
-
-                            groups,
-
-                            dubbed_audio_path,
-
-                            voice=khmer_voice,
-
-                            rate=khmer_rate,
-
-                            original_volume=(
-                                original_audio_volume
-                            ),
-                        )
-
-
-                    # =================================
-                    # MERGE VIDEO + DUBBED AUDIO
-                    # =================================
-
-                    run_ffmpeg(
-
-                        [
-                            "-y",
-
-                            "-i",
-                            video_path,
-
-                            "-i",
-                            dubbed_audio_path,
-
-                            "-map",
-                            "0:v:0",
-
-                            "-map",
-                            "1:a:0",
-
-                            "-c:v",
-                            "copy",
-
-                            "-c:a",
-                            "aac",
-
-                            "-b:a",
-                            "160k",
-
-                            "-movflags",
-                            "+faststart",
-
-                            dubbed_video_path,
-                        ]
-                    )
-
-
-                    video_path = (
-                        dubbed_video_path
-                    )
-
-
-                # =====================================
-                # CAPTION
-                # =====================================
-
-                create_ass(
-                    groups,
-                    ass_path,
-                )
-
-
-                with st.spinner(
-
-                    "🎬 កំពុងដាក់ Caption "
-                    "ជាប់ក្នុងវីដេអូ..."
-                ):
-
-                    burn_caption(
-
-                        video_path,
-
-                        ass_path,
-
-                        output_path,
-                    )
-
-
-                # =====================================
-                # RESULT
-                # =====================================
-
-                with open(
-                    output_path,
-                    "rb",
-                ) as f:
-
-                    output_data = f.read()
-
-
-                st.success(
-                    "✅ វីដេអូរួចរាល់!"
-                )
-
-
-                st.video(
-                    output_data
-                )
-
-
-                st.download_button(
-
-                    "⬇️ ទាញយក MP4",
-
-                    data=output_data,
-
-                    file_name=(
-                        "smey_auto_caption.mp4"
-                    ),
-
-                    mime="video/mp4",
-
-                    use_container_width=True,
-
-                    on_click="ignore",
-                )
-
-
-            except Exception as e:
-
-                st.error(
-                    "❌ មានបញ្ហាពេលបង្កើតវីដេអូ: "
-                    f"{e}"
+    temp_dir = os.path.join(
+        "temp",
+        work_id,
     )
+
+    os.makedirs(
+        temp_dir,
+        exist_ok=True,
+    )
+
+    input_path = os.path.join(
+        temp_dir,
+        uploaded.name,
+    )
+
+    audio_path = os.path.join(
+        temp_dir,
+        "audio.wav",
+    )
+
+    ass_path = os.path.join(
+        temp_dir,
+        "captions.ass",
+    )
+
+    output_path = os.path.join(
+        temp_dir,
+        "Smey_Khmer_Dubbing.mp4",
+    )
+
+    with open(
+        input_path,
+        "wb",
+    ) as f:
+        f.write(
+            uploaded.getbuffer()
+        )
+
+    try:
+        # -------------------------------------------------
+        # VIDEO DURATION
+        # -------------------------------------------------
+
+        duration = audio_duration(
+            input_path
+        )
+
+        if duration <= 0:
+            raise RuntimeError(
+                "Cannot read video duration."
+            )
+
+        # -------------------------------------------------
+        # EXTRACT AUDIO
+        # -------------------------------------------------
+
+        st.info(
+            "🎧 កំពុងយកសំឡេងពីវីដេអូ..."
+        )
+
+        extract_audio(
+            input_path,
+            audio_path,
+        )
+
+        # -------------------------------------------------
+        # WHISPER
+        # -------------------------------------------------
+
+        st.info(
+            "🎤 Whisper កំពុងស្តាប់សំឡេង..."
+        )
+
+        segments = transcribe_local(
+            audio_path,
+            source_language,
+        )
+
+        if not segments:
+            raise RuntimeError(
+                "Whisper មិនរកឃើញសំឡេងនិយាយ។"
+            )
+
+        # -------------------------------------------------
+        # TRANSLATION
+        # -------------------------------------------------
+
+        texts = [
+            x["text"]
+            for x in segments
+        ]
+
+        if source_language == "Khmer":
+            khmer_texts = texts
+        else:
+            st.info(
+                "🌐 កំពុងបកប្រែជា Khmer..."
+            )
+
+            khmer_texts = translate_local(
+                texts,
+                source_language,
+                "Khmer",
+            )
+
+        chunks = []
+
+        for seg, khmer in zip(
+            segments,
+            khmer_texts,
+        ):
+            chunks.append(
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"],
+                    "khmer": khmer,
+                }
+            )
+
+        # -------------------------------------------------
+        # ASS CAPTION
+        # -------------------------------------------------
+
+        make_ass(
+            chunks,
+            ass_path,
+        )
+
+        # -------------------------------------------------
+        # DUBBING
+        # -------------------------------------------------
+
+        if khmer_dubbing:
+            rate = (
+                f"{voice_speed:+d}%"
+            )
+
+            voice_files = (
+                make_khmer_dubbing(
+                    chunks,
+                    duration,
+                    temp_dir,
+                    rate=rate,
+                )
+            )
+
+            st.info(
+                "🎬 កំពុងបង្កើត MP4..."
+            )
+
+            render_final_video(
+                input_video=input_path,
+                output_video=output_path,
+                voice_files=voice_files,
+                ass_path=ass_path,
+                original_volume=original_volume,
+            )
+
+        else:
+            st.info(
+                "🎬 កំពុងបង្កើត Caption MP4..."
+            )
+
+            run_cmd(
+                [
+                    FFMPEG,
+                    "-i",
+                    input_path,
+                    "-vf",
+                    f"subtitles={ass_path}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "28",
+                    "-c:a",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    "-y",
+                    output_path,
+                ]
+            )
+
+        # -------------------------------------------------
+        # RESULT
+        # -------------------------------------------------
+
+        if not os.path.exists(
+            output_path
+        ):
+            raise RuntimeError(
+                "MP4 មិនត្រូវបានបង្កើត។"
+            )
+
+        file_size = os.path.getsize(
+            output_path
+        )
+
+        if file_size < 1000:
+            raise RuntimeError(
+                "MP4 output ខូច ឬទទេ។"
+            )
+
+        st.success(
+            "✅ រួចរាល់!"
+        )
+
+        st.video(
+            output_path
+        )
+
+        with open(
+            output_path,
+            "rb",
+        ) as f:
+            st.download_button(
+                label="⬇️ ទាញយក Khmer Dubbing MP4",
+                data=f,
+                file_name=(
+                    "Smey_Khmer_Dubbing.mp4"
+                ),
+                mime="video/mp4",
+                use_container_width=True,
+            )
+
+    except Exception as e:
+        st.error(
+            f"❌ Error: {e}"
+        )
+
+        st.exception(e)
+
+
+if __name__ == "__main__":
+    main()
