@@ -1,6 +1,7 @@
 streamlit
 imageio-ffmpeg
 faster-whisper
+av<19
 ctranslate2
 sentencepiece
 huggingface-hub
