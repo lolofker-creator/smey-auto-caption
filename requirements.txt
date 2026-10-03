@@ -1,10 +1,7 @@
 streamlit
-torch
-torchvision
 imageio-ffmpeg
-gTTS
-faster-whisper==1.2.1
-av>=11,<19
-ctranslate2==4.8.2
-sentencepiece==0.2.1
+faster-whisper
+ctranslate2
+sentencepiece
 huggingface-hub
+edge-tts
