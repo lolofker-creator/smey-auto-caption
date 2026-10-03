@@ -1,13 +1,12 @@
 import os
 import re
 import uuid
-import asyncio
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 import imageio_ffmpeg
-import edge_tts
+from gtts import gTTS
 from faster_whisper import WhisperModel
 import ctranslate2
 import sentencepiece as spm
@@ -28,8 +27,6 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 ASR_MODEL = "tiny"
 TRANSLATOR_MODEL = "osa911/nllb-200-distilled-600M-ct2-int8"
-
-KHMER_VOICE = "km-KH-SreymomNeural"
 
 LANG_MAP = {
     "Khmer": "khm_Khmr",
@@ -123,9 +120,6 @@ def safe_text(text):
 
 
 def safe_subtitle_path(path):
-    """
-    Make ASS path safe for FFmpeg subtitles filter.
-    """
     return (
         path
         .replace("\\", "/")
@@ -337,39 +331,27 @@ def translate_local(
 
 
 # =========================================================
-# TTS
+# KHMER TTS
 # =========================================================
-
-async def _tts_async(
-    text,
-    output_path,
-    rate="+0%",
-):
-    communicate = edge_tts.Communicate(
-        text=text,
-        voice=KHMER_VOICE,
-        rate=rate,
-        volume="+0%",
-        pitch="+0Hz",
-    )
-
-    await communicate.save(
-        output_path
-    )
-
 
 def tts_one(
     text,
     output_path,
     rate="+0%",
 ):
-    asyncio.run(
-        _tts_async(
-            text,
-            output_path,
-            rate,
-        )
-    )
+    """
+    Khmer TTS using Google gTTS.
+
+    No Microsoft/Bing WebSocket.
+    Normal voice speed is preserved.
+    FFmpeg handles timing/sync afterward.
+    """
+
+    gTTS(
+        text=text,
+        lang="km",
+        slow=False,
+    ).save(output_path)
 
 
 # =========================================================
@@ -516,7 +498,7 @@ def make_khmer_dubbing(
 
     valid = []
 
-    # Four TTS jobs at the same time.
+    # Generate 4 voices simultaneously.
     batch_size = 4
 
     for base in range(
@@ -671,19 +653,6 @@ def render_final_video(
             "No voice files."
         )
 
-    inputs = [
-        "-i",
-        input_video,
-    ]
-
-    for item in voice_files:
-        inputs.extend(
-            [
-                "-i",
-                item["file"],
-            ]
-        )
-
     filter_parts = []
 
     # Original music/audio.
@@ -736,7 +705,6 @@ def render_final_video(
         filter_parts
     )
 
-    # FIXED: safe ASS path.
     safe_ass_path = safe_subtitle_path(
         ass_path
     )
@@ -836,13 +804,14 @@ def extract_audio(
 # =========================================================
 
 def main():
+
     st.title(
         "🇰🇭 Smey Auto Caption"
     )
 
     st.caption(
         "Video → Speech → Khmer → "
-        "Sreymom Voice → Sync → MP4"
+        "Khmer Voice → Sync → MP4"
     )
 
     uploaded = st.file_uploader(
@@ -960,9 +929,10 @@ def main():
         )
 
     try:
-        # -------------------------------------------------
+
+        # =================================================
         # VIDEO DURATION
-        # -------------------------------------------------
+        # =================================================
 
         duration = audio_duration(
             input_path
@@ -973,9 +943,9 @@ def main():
                 "Cannot read video duration."
             )
 
-        # -------------------------------------------------
+        # =================================================
         # EXTRACT AUDIO
-        # -------------------------------------------------
+        # =================================================
 
         st.info(
             "🎧 កំពុងយកសំឡេងពីវីដេអូ..."
@@ -986,9 +956,9 @@ def main():
             audio_path,
         )
 
-        # -------------------------------------------------
+        # =================================================
         # WHISPER
-        # -------------------------------------------------
+        # =================================================
 
         st.info(
             "🎤 Whisper កំពុងស្តាប់សំឡេង..."
@@ -1004,9 +974,9 @@ def main():
                 "Whisper មិនរកឃើញសំឡេងនិយាយ។"
             )
 
-        # -------------------------------------------------
+        # =================================================
         # TRANSLATION
-        # -------------------------------------------------
+        # =================================================
 
         texts = [
             x["text"]
@@ -1014,9 +984,11 @@ def main():
         ]
 
         if source_language == "Khmer":
+
             khmer_texts = texts
 
         else:
+
             st.info(
                 "🌐 កំពុងបកប្រែជា Khmer..."
             )
@@ -1042,20 +1014,23 @@ def main():
                 }
             )
 
-        # -------------------------------------------------
+        # =================================================
         # ASS CAPTION
-        # -------------------------------------------------
+        # =================================================
 
         make_ass(
             chunks,
             ass_path,
         )
 
-        # -------------------------------------------------
+        # =================================================
         # DUBBING
-        # -------------------------------------------------
+        # =================================================
 
         if khmer_dubbing:
+
+            # gTTS itself stays at normal speed.
+            # FFmpeg adjusts timing afterward.
             rate = (
                 f"{voice_speed:+d}%"
             )
@@ -1082,6 +1057,7 @@ def main():
             )
 
         else:
+
             st.info(
                 "🎬 កំពុងបង្កើត Caption MP4..."
             )
@@ -1124,9 +1100,9 @@ def main():
                 ]
             )
 
-        # -------------------------------------------------
+        # =================================================
         # RESULT
-        # -------------------------------------------------
+        # =================================================
 
         if not os.path.exists(
             output_path
@@ -1156,6 +1132,7 @@ def main():
             output_path,
             "rb",
         ) as f:
+
             st.download_button(
                 label=(
                     "⬇️ ទាញយក "
@@ -1170,6 +1147,7 @@ def main():
             )
 
     except Exception as e:
+
         st.error(
             f"❌ Error: {e}"
         )
