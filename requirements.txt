@@ -5,4 +5,4 @@ av<19
 ctranslate2
 sentencepiece
 huggingface-hub
-edge-tts
+edge-tts==7.2.1
